@@ -142,10 +142,10 @@ async def num_tokens_from_messages(messages, model):
                     return data['input_tokens']
                 else:
                     error = await response.text()
-                    logger.error(f"Anthropic token count failed: {error}")
+                    logger.error(f"Anthropic token count failed:", exc_info=True)
                     return 0
             except Exception as e:
-                logger.error(f"Anthropic API error: {str(e)}")
+                logger.error("Anthropic API error:", exc_info=True)
                 return 0
     
     elif model == 'microsoft/wizardlm-2-8x22b':
@@ -186,7 +186,7 @@ def setup_tray_icon():
                 latest_log = os.path.join(log_dir, log_files[0])
                 os.startfile(latest_log)
         except Exception as e:
-            logger.error(f"Failed to open log: {e}")
+            logger.error(f"Failed to open log:", exc_info=True)
 
     def exit_app():
         logger.info("Shutting down via tray icon...")
@@ -207,7 +207,7 @@ def setup_tray_icon():
         icon = pystray.Icon("RHBot", image, "RHBot is running", menu)
         icon.run()
     except Exception as e:
-        logger.error(f"Failed to create tray icon: {e}")
+        logger.error(f"Failed to create tray icon:", exc_info=True)
 
 class StartGameView(discord.ui.View):
     def __init__(self, guild_id: int, user_id: int, channel: discord.TextChannel):
@@ -378,6 +378,7 @@ class WishModal(Modal):
                 )
                 response = completion.choices[0].message.content
             except Exception as e:
+                logger.error("Response generation failed:", exc_info=True)
                 response = f"🔥 The Paw trembles... An error occurred: {str(e)}"
 
         # Update game data
@@ -553,7 +554,7 @@ async def on_ready():
             timeout=10
         )
     except Exception as e:
-        logger.error(f"Failed to send startup notification: {str(e)}")
+        logger.error(f"Failed to send startup notification:", exc_info=True)
 
 @bot.event
 async def on_guild_join(guild):
@@ -846,6 +847,7 @@ async def get_character_info(interaction: discord.Interaction, character_id: str
         )
         await interaction.response.send_message(info, ephemeral=True)
     except Exception as e:
+        logger.error("Error loading character:", exc_info=True)
         await interaction.response.send_message(f'Error loading character: {str(e)}', ephemeral=True)
 
 @bot.tree.command(name='delete-character', description='Delete a character definition')
@@ -869,7 +871,7 @@ async def delete_character(interaction: discord.Interaction, character_id: str):
         try:
             os.remove(char_path)
         except Exception as e:
-            logger.error("Error deleting character %s:", character_id, exc_info=True)
+            logger.error(f"Error deleting character {character_id}:", exc_info=True)
             await interaction.followup.send(f'Error deleting character: {str(e)}', ephemeral=True)
 
 @bot.tree.command(name='ping', description='Check the bot\'s latency')
@@ -1070,6 +1072,7 @@ async def on_message(message):
                 await message.channel.send(chunk)
         
         except Exception as e:
+            logger.error("An error occurred:", exc_info=True)
             await message.channel.send(f"An error occurred: {str(e)}")
 
 if __name__ == '__main__':
