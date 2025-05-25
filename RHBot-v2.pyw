@@ -837,15 +837,30 @@ async def get_character_info(interaction: discord.Interaction, character_id: str
     try:
         with open(char_path, 'r') as f:
             char_data = json.load(f)
-        info = (
+        
+        # Send initial information without the description content
+        initial_info = (
             f"Name: `{char_data['name']}`\n"
             f"ID: `{character_id}`\n"
             f"Creator ID: `{char_data['creator_id']}`\n"
             f"Created At: `{char_data['created_at']}`\n"
-            "Description:\n"
-            f"```plaintext\n{char_data['description']}\n```"
+            "Description:"
         )
-        await interaction.response.send_message(info, ephemeral=True)
+        await interaction.response.send_message(initial_info, ephemeral=True)
+        
+        # Split description into chunks of 1950 characters each (to fit code blocks)
+        description = char_data['description']
+        chunk_size = 1950
+        chunks = [
+            description[i:i + chunk_size]
+            for i in range(0, len(description), chunk_size)
+        ]
+        
+        # Send each chunk as a follow-up code block
+        for chunk in chunks:
+            code_block = f"```plaintext\n{chunk}\n```"
+            await interaction.followup.send(code_block, ephemeral=True)
+            
     except Exception as e:
         logger.error("Error loading character:", exc_info=True)
         await interaction.response.send_message(f'Error loading character: {str(e)}', ephemeral=True)
