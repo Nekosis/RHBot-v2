@@ -49,6 +49,9 @@ root_logger.setLevel(logging.INFO)
 root_logger.addHandler(file_handler)
 root_logger.addHandler(stream_handler)
 
+# Create dedicated logger instance
+logger = logging.getLogger('RHBot')
+
 # Other configuration and setup
 with open('config.yaml') as f:
     config = yaml.safe_load(f)
@@ -139,10 +142,10 @@ async def num_tokens_from_messages(messages, model):
                     return data['input_tokens']
                 else:
                     error = await response.text()
-                    logging.getLogger('RHBot').error(f"Anthropic token count failed: {error}")
+                    logger.error(f"Anthropic token count failed: {error}")
                     return 0
             except Exception as e:
-                logging.getLogger('RHBot').error(f"Anthropic API error: {str(e)}")
+                logger.error(f"Anthropic API error: {str(e)}")
                 return 0
     
     elif model == 'microsoft/wizardlm-2-8x22b':
@@ -183,10 +186,10 @@ def setup_tray_icon():
                 latest_log = os.path.join(log_dir, log_files[0])
                 os.startfile(latest_log)
         except Exception as e:
-            logging.getLogger('RHBot').error(f"Failed to open log: {e}")
+            logger.error(f"Failed to open log: {e}")
 
     def exit_app():
-        logging.getLogger('RHBot').info("Shutting down via tray icon...")
+        logger.info("Shutting down via tray icon...")
         icon.stop()
         # Schedule bot shutdown
         loop = bot.loop
@@ -204,7 +207,7 @@ def setup_tray_icon():
         icon = pystray.Icon("RHBot", image, "RHBot is running", menu)
         icon.run()
     except Exception as e:
-        logging.getLogger('RHBot').error(f"Failed to create tray icon: {e}")
+        logger.error(f"Failed to create tray icon: {e}")
 
 class StartGameView(discord.ui.View):
     def __init__(self, guild_id: int, user_id: int, channel: discord.TextChannel):
@@ -327,10 +330,10 @@ class WishModal(Modal):
                 valid = False
             else:
                 # Log unexpected response but still reject
-                logging.getLogger('RHBot').warning("Unexpected validation response for wish \"%s\": \"%s\"", wish, raw_response)
+                logger.warning("Unexpected validation response for wish \"%s\": \"%s\"", wish, raw_response)
                 valid = False
         except Exception as e:
-            logging.getLogger('RHBot').error("Validation failed:", exc_info=True)
+            logger.error("Validation failed:", exc_info=True)
             valid = False
 
         if not valid:
@@ -539,7 +542,7 @@ class DeleteConfirmView(discord.ui.View):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    logging.getLogger('RHBot').info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
 
     try:
         # Send desktop notification
@@ -550,7 +553,7 @@ async def on_ready():
             timeout=10
         )
     except Exception as e:
-        logging.getLogger('RHBot').error(f"Failed to send startup notification: {str(e)}")
+        logger.error(f"Failed to send startup notification: {str(e)}")
 
 @bot.event
 async def on_guild_join(guild):
@@ -866,7 +869,7 @@ async def delete_character(interaction: discord.Interaction, character_id: str):
         try:
             os.remove(char_path)
         except Exception as e:
-            logging.getLogger('RHBot').error("Error deleting character %s:", character_id, exc_info=True)
+            logger.error("Error deleting character %s:", character_id, exc_info=True)
             await interaction.followup.send(f'Error deleting character: {str(e)}', ephemeral=True)
 
 @bot.tree.command(name='ping', description='Check the bot\'s latency')
@@ -946,7 +949,7 @@ async def on_message(message):
                         alt_text = completion_vision.choices[0].message.content
                         alt_texts.append(alt_text)
                     except Exception as e:
-                        logging.getLogger('RHBot').error("Image processing error:", exc_info=True)
+                        logger.error("Image processing error:", exc_info=True)
                         alt_texts.append("[Image processing failed]")
 
             # Append alt texts to the message content
@@ -1078,4 +1081,4 @@ if __name__ == '__main__':
         # Disable discord.py’s default handler so it won’t re-configure logging
         bot.run(DISCORD_TOKEN, log_handler=None, log_level=logging.INFO)
     finally:
-        logging.getLogger('RHBot').info("Bot has shut down")
+        logger.info("Bot has shut down")
