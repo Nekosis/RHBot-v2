@@ -210,16 +210,17 @@ def setup_tray_icon():
         logger.error(f"Failed to create tray icon:", exc_info=True)
 
 def is_admin_or_ai_manager(interaction: discord.Interaction) -> bool:
-    # Check if user has administrator permissions
     if interaction.user.guild_permissions.administrator:
         return True
     
-    # Check if user has AI Manager role
     ai_manager_role = get_ai_manager_role(interaction.guild.id)
-    if ai_manager_role:
-        return any(role.id == ai_manager_role for role in interaction.user.roles)
+    if ai_manager_role and any(role.id == ai_manager_role for role in interaction.user.roles):
+        return True
     
-    return False
+    # Raise CheckFailure with error message
+    raise app_commands.CheckFailure(
+        "You do not have permission to run this command."
+    )
 
 def get_ai_manager_role(guild_id: int) -> Optional[int]:
     role_file = os.path.join(get_guild_dir(guild_id), 'ai_manager_role.json')
@@ -563,6 +564,21 @@ class DeleteConfirmView(discord.ui.View):
 
     async def on_timeout(self):
         self.stop()
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
+):
+    if isinstance(error, app_commands.CheckFailure):
+        # Send ephemeral error message
+        await interaction.response.send_message(
+            str(error),
+            ephemeral=True
+        )
+    else:
+        # Log other errors
+        logger.error("Command error:", exc_info=error)
 
 @bot.event
 async def on_ready():
