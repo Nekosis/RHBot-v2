@@ -43,11 +43,13 @@ Run `RHBot-v2.pyw` (note the `.pyw` extension for headless operation). The bot w
 
 ## Commands
 
-- `/activate` - Activate the regular assistant mode in the current channel. The bot will respond to every message in the channel as a general-purpose assistant. You must be an administrator to run this command.
+- `/set-ai-manager-role` - Designate a role that can manage the AI without being granted full administrator permissions. Requires administrator permissions or existing AI Manager role.
 
-- `/deactivate` - Deactivate the assistant or a character in the current channel. This will delete the channel's conversation history. You must be an administrator to run this command.
+- `/activate` - Activate the regular assistant mode in the current channel. The bot will respond to every message in the channel as a general-purpose assistant. Requires administrator permissions or the AI Manager role.
 
-- `/wack` - Delete the current channel's conversation history. The bot will continue to respond to messages in the channel, but any previous conversation will be forgotten. You must be an administrator to run this command.
+- `/deactivate` - Deactivate the assistant or a character in the current channel. This will delete the channel's conversation history. Requires administrator permissions or the AI Manager role.
+
+- `/wack` - Delete the current channel's conversation history. The bot will continue to respond to messages in the channel, but any previous conversation will be forgotten. Requires administrator permissions or the AI Manager role.
 
 - `/set-alias` - Set an alias for the bot to refer to you as instead of your Discord username. Note that aliases are global across all servers the bot is a member of.
 
@@ -55,13 +57,13 @@ Run `RHBot-v2.pyw` (note the `.pyw` extension for headless operation). The bot w
 
 - `/create-character` - Create a new roleplay character that the bot can act as. You can use the placeholders `{user}` and `{char}` in the Character Description field, which, when sent to the AI, will be replaced with the username of the person interacting with the character and the character's name, respectively.
 
-- `/activate-character` - Activate a character in the current channel using its Character ID. The bot will respond to every message in the channel as the character. You must be an administrator to run this command.
+- `/activate-character` - Activate a character in the current channel using its Character ID. The bot will respond to every message in the channel as the character. Requires administrator permissions or the AI Manager role.
 
-- `/list-characters` - List all available characters that have been created. You must be an administrator to run this command.
+- `/list-characters` - List all available characters that have been created. Requires administrator permissions or the AI Manager role.
 
 - `/get-character-info` - Get information about a character using its ID.
 
-- `/delete-character` - Delete a character. You must be an administrator to run this command.
+- `/delete-character` - Delete a character. Requires administrator permissions or the AI Manager role.
 
 - `/monkeys-paw` - Begin a game of Monkey's Paw. You will have 5 wishes, and the mysterious Monkey's Paw will grant them—with a twist.
 

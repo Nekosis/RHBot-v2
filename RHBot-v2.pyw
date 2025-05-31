@@ -209,6 +209,30 @@ def setup_tray_icon():
     except Exception as e:
         logger.error(f"Failed to create tray icon:", exc_info=True)
 
+def is_admin_or_ai_manager(interaction: discord.Interaction) -> bool:
+    # Check if user has administrator permissions
+    if interaction.user.guild_permissions.administrator:
+        return True
+    
+    # Check if user has AI Manager role
+    ai_manager_role = get_ai_manager_role(interaction.guild.id)
+    if ai_manager_role:
+        return any(role.id == ai_manager_role for role in interaction.user.roles)
+    
+    return False
+
+def get_ai_manager_role(guild_id: int) -> Optional[int]:
+    role_file = os.path.join(get_guild_dir(guild_id), 'ai_manager_role.json')
+    if not os.path.exists(role_file):
+        return None
+    
+    try:
+        with open(role_file, 'r') as f:
+            data = json.load(f)
+        return data.get('role_id')
+    except:
+        return None
+
 class StartGameView(discord.ui.View):
     def __init__(self, guild_id: int, user_id: int, channel: discord.TextChannel):
         super().__init__(timeout=900)  # 15 minutes in seconds
@@ -561,8 +585,20 @@ async def on_guild_join(guild):
     guild_dir = get_guild_dir(guild.id)
     os.makedirs(guild_dir, exist_ok=True)
 
+@bot.tree.command(name='set-ai-manager-role', description='Set the role that can manage the AI (admin only)')
+@app_commands.check(is_admin_or_ai_manager)
+async def set_ai_manager_role(interaction: discord.Interaction, role: discord.Role):
+    guild_id = interaction.guild.id
+    role_file = os.path.join(get_guild_dir(guild_id), 'ai_manager_role.json')
+    
+    os.makedirs(os.path.dirname(role_file), exist_ok=True)
+    with open(role_file, 'w') as f:
+        json.dump({'role_id': role.id}, f)
+    
+    await interaction.response.send_message(f'AI Manager role set to {role.mention}!', ephemeral=True)
+
 @bot.tree.command(name='activate', description='Activate AI in this channel')
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(is_admin_or_ai_manager)
 @app_commands.describe(model='The AI model to use (default: GPT-4o)')
 @app_commands.choices(model=MODEL_CHOICES)
 async def activate(interaction: discord.Interaction, model: Optional[str] = None):
@@ -582,7 +618,7 @@ async def activate(interaction: discord.Interaction, model: Optional[str] = None
     await interaction.response.send_message(f'Channel activated using `{model}`! RHBot-v2 will now respond here.')
 
 @bot.tree.command(name='wack', description='Wipe conversation history')
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(is_admin_or_ai_manager)
 async def wack(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     channel_id = interaction.channel.id
@@ -603,7 +639,7 @@ async def wack(interaction: discord.Interaction):
     await interaction.response.send_message('Conversation history wiped!')
 
 @bot.tree.command(name='deactivate', description='Deactivate AI in this channel')
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(is_admin_or_ai_manager)
 async def deactivate(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     channel_id = interaction.channel.id
@@ -753,7 +789,7 @@ async def create_character(interaction: discord.Interaction):
     await interaction.response.send_modal(CreateCharacterModal())
 
 @bot.tree.command(name='activate-character', description='Activate a character in this channel')
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(is_admin_or_ai_manager)
 @app_commands.describe(
     character_id='The ID of the character to activate',
     model='The AI model to use (default: GPT-4o)'
@@ -796,7 +832,7 @@ async def activate_character(interaction: discord.Interaction, character_id: str
     await interaction.response.send_message(f'Channel activated with character `{character_id}` using `{model}`!')
 
 @bot.tree.command(name='list-characters', description='List all available characters')
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(is_admin_or_ai_manager)
 async def list_characters(interaction: discord.Interaction):
     chars_dir = os.path.join(DATA_DIR, 'chars')
     try:
@@ -866,7 +902,7 @@ async def get_character_info(interaction: discord.Interaction, character_id: str
         await interaction.response.send_message(f'Error loading character: {str(e)}', ephemeral=True)
 
 @bot.tree.command(name='delete-character', description='Delete a character definition')
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.check(is_admin_or_ai_manager)
 @app_commands.describe(character_id='The ID of the character to delete')
 async def delete_character(interaction: discord.Interaction, character_id: str):
     char_path = os.path.join(DATA_DIR, 'chars', f'{character_id}.json')
