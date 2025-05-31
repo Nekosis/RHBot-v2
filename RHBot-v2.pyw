@@ -601,7 +601,7 @@ async def on_guild_join(guild):
     guild_dir = get_guild_dir(guild.id)
     os.makedirs(guild_dir, exist_ok=True)
 
-@bot.tree.command(name='set-ai-manager-role', description='Set the role that can manage the AI (admin only)')
+@bot.tree.command(name='set-ai-manager-role', description='Set the role that can manage the AI')
 @app_commands.check(is_admin_or_ai_manager)
 async def set_ai_manager_role(interaction: discord.Interaction, role: discord.Role):
     guild_id = interaction.guild.id
