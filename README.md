@@ -1,4 +1,5 @@
 # RHBot-v2
+ [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg)](http://www.wtfpl.net/about/) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Nekosis/RHBot-v2)
 
 RHBot-v2 ("**R**ipper's **H**angout **Bot**, **V**ersion **2**") is an AI-focused Discord bot powered by GPT-4o, intended to be a replacement for Shapes, Inc. roleplay bots after their [removal from Discord on account of TOS violations](https://x.com/panley01/status/1918139269652107525). It is intended primarily for private use on one or a small network of servers and aims to be a fully TOS-compliant alternative to Shapes, Inc. services. However, RHBot-v2 has many capabilities beyond roleplay, which include acting as a regular assistant, playing games, and more!
 
@@ -87,4 +88,4 @@ You can optionally pass a model to `/activate` or `/activate-character` to have 
 
 ## License
 
-RHBot-v2 is licensed under the [WTFPL](https://www.wtfpl.net/), version 2. See the LICENSE file for more details.
+RHBot-v2 is licensed under the [WTFPL](https://www.wtfpl.net/about/), version 2. See the LICENSE file for more details.
