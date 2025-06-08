@@ -16,7 +16,7 @@ First, ensure all necessary dependencies are installed:
 pip install -r requirements.txt
 ```
 
-Make sure `RHBot-v2.pyw` is in a dedicated folder along with this README file, the LICENSE file, and the `resources/` directory. Create a new file in the same directory called `config.yaml` and set it up as follows:
+Make sure `RHBot-v2.pyw` is in a dedicated folder along with this README file, the LICENSE file, the `requirements.txt` file, and the `resources/` directory. Create a new file in the same directory called `config.yaml` and set it up as follows:
 
 ```yaml
 discord_token: "YOUR_DISCORD_TOKEN"
