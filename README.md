@@ -13,7 +13,7 @@ RHBot-v2's main instance runs in [Artificial Hangout](https://discord.gg/TWpw5ZF
 First, ensure all necessary dependencies are installed:
 
 ```bash
-pip install discord.py pyyaml tiktoken openai anthropic aiohttp transformers protobuf blobfile sentencepiece pystray pillow plyer
+pip install -r requirements.txt
 ```
 
 Make sure `RHBot-v2.pyw` is in a dedicated folder along with this README file, the LICENSE file, and the `resources/` directory. Create a new file in the same directory called `config.yaml` and set it up as follows:

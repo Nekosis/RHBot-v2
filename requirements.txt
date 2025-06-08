@@ -1,0 +1,13 @@
+aiohttp
+anthropic
+blobfile
+discord.py
+openai
+pillow
+plyer
+protobuf
+pystray
+pyyaml
+sentencepiece
+tiktoken
+transformers
