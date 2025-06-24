@@ -70,7 +70,7 @@ Run `RHBot-v2.pyw` (note the `.pyw` extension for headless operation). The bot w
 
 - `/monkeys-paw-abort` - End your current Monkey's Paw game.
 
-- `/create-player-card` – Create a player card for adventures.
+- `/create-player-card` – Create a player card for adventures. You can use the `{player}` placeholder in the Player Description field, which, when sent to the AI, will be replaced with the player's name.
 
 - `/list-player-cards` – List your player cards.
 

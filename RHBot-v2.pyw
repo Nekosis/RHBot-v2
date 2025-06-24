@@ -567,26 +567,27 @@ class CreateCharacterModal(Modal, title='Create Character'):
 class CreatePlayerCardModal(Modal, title='Create Player Card'):
     def __init__(self):
         super().__init__()
-        self.card_id = TextInput(
-            label='Card ID (lowercase / numbers / hyphens)',
-            max_length=32,
-            required=True,
-            placeholder='rogue-frog'
-        )
         self.name = TextInput(
-            label='Player Name (shown in game)',
+            label='Player Name',
             max_length=100,
-            required=True
+            required=True,
+            placeholder='Enter the player\'s name...'
         )
         self.description = TextInput(
-            label='Player Description (you can use {player})',
+            label='Player Description',
             style=discord.TextStyle.long,
             required=True,
-            placeholder='A cunning thief who fears the light…'
+            placeholder='Describe the player (use {player} to insert the player\'s name)...'
         )
-        self.add_item(self.card_id)
+        self.card_id = TextInput(
+            label='Card ID',
+            max_length=32,
+            required=True,
+            placeholder='Unique identifier (lowercase, numbers, hyphens only)'
+        )
         self.add_item(self.name)
         self.add_item(self.description)
+        self.add_item(self.card_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         cid = self.card_id.value.strip()
@@ -615,7 +616,7 @@ class CreatePlayerCardModal(Modal, title='Create Player Card'):
             }, f, indent=2)
 
         await interaction.response.send_message(
-            f'Player card **{self.name.value}** saved as `{cid}`!',
+            f'Player card {self.name.value} saved as `{cid}`!',
             ephemeral=True
         )
 
@@ -1042,7 +1043,7 @@ async def get_player_card_info(interaction: discord.Interaction, card_id: str):
     with open(path) as f:
         data = json.load(f)
     await interaction.response.send_message(
-        f"**Name:** {data['name']}\n**ID:** `{card_id}`\n**Created:** {data['created_at']}\n**Description:**\n```{data['description']}```",
+        f"Name: {data['name']}\nID: `{card_id}`\nCreated: {data['created_at']}\nDescription:\n```{data['description']}```",
         ephemeral=True
     )
 
