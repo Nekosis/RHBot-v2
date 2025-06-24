@@ -1061,6 +1061,7 @@ async def delete_player_card(interaction: discord.Interaction, card_id: str):
 @app_commands.check(is_admin_or_ai_manager)
 @app_commands.describe(card_id='Your player card ID')
 async def start_game(interaction: discord.Interaction, card_id: str):
+    await interaction.response.defer(thinking=True)
     channel_game = get_text_game_path(interaction.guild.id, interaction.channel.id)
     if os.path.exists(channel_game):
         await interaction.response.send_message('A game is already running here.', ephemeral=True)
