@@ -70,11 +70,44 @@ Run `RHBot-v2.pyw` (note the `.pyw` extension for headless operation). The bot w
 
 - `/monkeys-paw-abort` - End your current Monkey's Paw game.
 
+- `/create-player-card` – Create a player card for adventures.
+
+- `/list-player-cards` – List your player cards.
+
+- `/get-player-card-info` – View one of your cards.
+
+- `/delete-player-card` – Delete one of your cards.
+
+- `/start-game` – Begin an adventure in the current channel. Requires administrator permissions or the AI Manager role.
+
+- `/reset-game` – Clear the adventure’s history. Requires administrator permissions or the AI Manager role.
+
+- `/stop-game` – End the adventure and wipe its history. Requires administrator permissions or the AI Manager role.
+
+- `/drop-in` – Join an active adventure with one of your player cards.
+
 - `/ping` - You know this one.
 
 ## Images
 
 RHBot-v2 supports image interpretation. If an image is attached to a message, the bot will automatically generate a detailed text description of the image and treat this description as if it were part of the original message.
+
+## Text Adventure System
+
+RHBot-v2 now ships with a multiplayer, AI-narrated text adventure game.  
+Players create personal player cards, an admin starts a session, and everybody’s actions are woven together by the narrator.
+
+### How it works
+
+1. **Create a player card** – `/create-player-card` (each user can keep multiple cards).
+
+2. **Start the game** – An admin/AI Manager runs `/start-game <card_id>` in a channel. This channel becomes the adventure venue.
+
+3. **Drop in** – Other users join with `/drop-in <card_id> [entrance text]`; the narrator introduces them diegetically.
+
+4. **Play** – Simply type; the narrator replies with the evolving story.
+
+5. **Manage** – Admins can `/reset-game` (wipe history but keep players) or `/stop-game` (end and delete everything).
 
 ## Models
 

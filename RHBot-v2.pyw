@@ -173,6 +173,25 @@ def get_channel_path(guild_id, channel_id):
 def get_game_path(guild_id: int, user_id: int) -> str:
     return os.path.join(DATA_DIR, str(guild_id), 'games', 'monkeyspaw', f'{user_id}.json')
 
+def get_player_cards_dir(user_id: int) -> str:
+    return os.path.join(DATA_DIR, 'player_cards', str(user_id))
+
+def get_player_card_path(user_id: int, card_id: str) -> str:
+    return os.path.join(get_player_cards_dir(user_id), f'{card_id}.json')
+
+def get_text_game_path(guild_id: int, channel_id: int) -> str:
+    return os.path.join(
+        DATA_DIR, str(guild_id), 'games', 'textadventure', f'{channel_id}.json'
+    )
+
+def build_game_system_prompt(players: dict) -> str:
+    """Return a narrator prompt including all active players."""
+    roster = '\n'.join(
+        f"- {p['name']}: {p['description'].format(player=p['name'])}"
+        for p in players.values()
+    )
+    return (f"You are an imaginative, immersive narrator for a co-operative multiplayer text adventure. Respond **only** as narrative prose, never mentioning game mechanics.\n\n**Active player roster:**\n{roster}\n\nAfter each user input, describe how the world reacts and ask what the players do next.")
+
 def setup_tray_icon():
     icon_path = os.path.join(os.path.dirname(__file__), 'resources', 'icon.ico')
     
@@ -542,6 +561,61 @@ class CreateCharacterModal(Modal, title='Create Character'):
 
         await interaction.response.send_message(
             f'Character "{self.name.value}" created with ID `{char_id}`!',
+            ephemeral=True
+        )
+
+class CreatePlayerCardModal(Modal, title='Create Player Card'):
+    def __init__(self):
+        super().__init__()
+        self.card_id = TextInput(
+            label='Card ID (lowercase / numbers / hyphens)',
+            max_length=32,
+            required=True,
+            placeholder='rogue-frog'
+        )
+        self.name = TextInput(
+            label='Player Name (shown in game)',
+            max_length=100,
+            required=True
+        )
+        self.description = TextInput(
+            label='Player Description (you can use {player})',
+            style=discord.TextStyle.long,
+            required=True,
+            placeholder='A cunning thief who fears the light…'
+        )
+        self.add_item(self.card_id)
+        self.add_item(self.name)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cid = self.card_id.value.strip()
+        if not re.match(r'^[a-z0-9\-]+$', cid):
+            await interaction.response.send_message(
+                'Card ID may only contain lowercase letters, numbers and hyphens.',
+                ephemeral=True
+            )
+            return
+
+        user_dir = get_player_cards_dir(interaction.user.id)
+        os.makedirs(user_dir, exist_ok=True)
+        card_path = get_player_card_path(interaction.user.id, cid)
+        if os.path.exists(card_path):
+            await interaction.response.send_message(
+                'You already have a card with that ID.',
+                ephemeral=True
+            )
+            return
+
+        with open(card_path, 'w') as f:
+            json.dump({
+                'name': self.name.value,
+                'description': self.description.value,
+                'created_at': str(discord.utils.utcnow())
+            }, f, indent=2)
+
+        await interaction.response.send_message(
+            f'Player card **{self.name.value}** saved as `{cid}`!',
             ephemeral=True
         )
 
@@ -941,6 +1015,180 @@ async def delete_character(interaction: discord.Interaction, character_id: str):
             logger.error(f"Error deleting character {character_id}:", exc_info=True)
             await interaction.followup.send(f'Error deleting character: {str(e)}', ephemeral=True)
 
+@bot.tree.command(name='create-player-card', description='Create a player card for text adventures')
+async def create_player_card(interaction: discord.Interaction):
+    await interaction.response.send_modal(CreatePlayerCardModal())
+
+@bot.tree.command(name='list-player-cards', description='List your player cards')
+async def list_player_cards(interaction: discord.Interaction):
+    user_dir = get_player_cards_dir(interaction.user.id)
+    if not os.path.isdir(user_dir):
+        await interaction.response.send_message('You have no cards yet.', ephemeral=True)
+        return
+    cards = [f[:-5] for f in os.listdir(user_dir) if f.endswith('.json')]
+    msg = '\n'.join(f'- `{c}`' for c in cards) or '*none*'
+    await interaction.response.send_message(
+        f'**Your cards:**\n{msg}',
+        ephemeral=True
+    )
+
+@bot.tree.command(name='get-player-card-info', description='View one of your player cards')
+@app_commands.describe(card_id='ID of the card you own')
+async def get_player_card_info(interaction: discord.Interaction, card_id: str):
+    path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('Card not found.', ephemeral=True)
+        return
+    with open(path) as f:
+        data = json.load(f)
+    await interaction.response.send_message(
+        f"**Name:** {data['name']}\n**ID:** `{card_id}`\n**Created:** {data['created_at']}\n**Description:**\n```{data['description']}```",
+        ephemeral=True
+    )
+
+@bot.tree.command(name='delete-player-card', description='Delete one of your player cards')
+@app_commands.describe(card_id='ID of the card to delete')
+async def delete_player_card(interaction: discord.Interaction, card_id: str):
+    path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('Card not found.', ephemeral=True)
+        return
+    os.remove(path)
+    await interaction.response.send_message(f'Deleted card `{card_id}`.', ephemeral=True)
+
+@bot.tree.command(name='start-game', description='Begin a multiplayer text adventure in this channel')
+@app_commands.check(is_admin_or_ai_manager)
+@app_commands.describe(card_id='Your player card ID')
+async def start_game(interaction: discord.Interaction, card_id: str):
+    channel_game = get_text_game_path(interaction.guild.id, interaction.channel.id)
+    if os.path.exists(channel_game):
+        await interaction.response.send_message('A game is already running here.', ephemeral=True)
+        return
+
+    # Load initiating player card
+    pc_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(pc_path):
+        await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
+        return
+    with open(pc_path) as f:
+        pc_data = json.load(f)
+
+    # Initial game state
+    game_state = {
+        'players': {
+            str(interaction.user.id): {
+                'name': pc_data['name'],
+                'description': pc_data['description'],
+                'card_id': card_id,
+                'joined_at': str(discord.utils.utcnow())
+            }
+        },
+        'history': [], # Chat history for the narrator
+        'model': 'openai/gpt-4o'
+    }
+    os.makedirs(os.path.dirname(channel_game), exist_ok=True)
+
+    # Generate opening scene
+    system_prompt = build_game_system_prompt(game_state['players'])
+    try:
+        completion = await client.chat.completions.create(
+            model=game_state['model'],
+            messages=[{'role': 'system', 'content': system_prompt}],
+            temperature=0.7
+        )
+        opening = completion.choices[0].message.content
+    except Exception as e:
+        opening = f"(AI failure starting game: {e})"
+        logger.error("Text-adventure opening failed:", exc_info=True)
+
+    # Save and send
+    game_state['history'].append({'role': 'assistant', 'content': opening})
+    with open(channel_game, 'w') as f:
+        json.dump(game_state, f, indent=2)
+
+    await interaction.response.send_message(f"**The adventure begins…**\n{opening}")
+
+@bot.tree.command(name='reset-game', description='Clear adventure history but keep players')
+@app_commands.check(is_admin_or_ai_manager)
+async def reset_game(interaction: discord.Interaction):
+    path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('No game active.', ephemeral=True)
+        return
+    with open(path) as f:
+        state = json.load(f)
+    state['history'] = []
+    with open(path, 'w') as f:
+        json.dump(state, f, indent=2)
+    await interaction.response.send_message('History wiped. Narrator memory is fresh.')
+
+@bot.tree.command(name='stop-game', description='Stop the text adventure and wipe history')
+@app_commands.check(is_admin_or_ai_manager)
+async def stop_game(interaction: discord.Interaction):
+    path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('No game active.', ephemeral=True)
+        return
+    os.remove(path)
+    await interaction.response.send_message('Game ended and history deleted.')
+
+@bot.tree.command(name='drop-in', description='Join the current adventure')
+@app_commands.describe(card_id='Your player card ID',
+                       style='(Optional) How you want to appear in-story')
+async def drop_in(interaction: discord.Interaction, card_id: str, style: Optional[str] = None):
+    path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('No game running here.', ephemeral=True)
+        return
+    with open(path) as f:
+        state = json.load(f)
+
+    if str(interaction.user.id) in state['players']:
+        await interaction.response.send_message('You are already in the game.', ephemeral=True)
+        return
+
+    pc_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(pc_path):
+        await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
+        return
+    with open(pc_path) as f:
+        pc_data = json.load(f)
+
+    # Add player
+    state['players'][str(interaction.user.id)] = {
+        'name': pc_data['name'],
+        'description': pc_data['description'],
+        'card_id': card_id,
+        'joined_at': str(discord.utils.utcnow())
+    }
+
+    # Ask narrator to weave them in
+    system_prompt = build_game_system_prompt(state['players'])
+    join_msg = (
+        f"A new player wishes to join: {pc_data['name']} "
+        f"({pc_data['description'].format(player=pc_data['name'])}). "
+        + (f"They prefer to enter like this: {style}" if style else "Narrator, choose how they appear.")
+    )
+    messages = [{'role': 'system', 'content': system_prompt}] + state['history'] + [
+        {'role': 'user', 'content': join_msg}
+    ]
+    try:
+        completion = await client.chat.completions.create(
+            model=state['model'],
+            messages=messages,
+            temperature=0.7
+        )
+        narration = completion.choices[0].message.content
+    except Exception as e:
+        narration = f"(AI error introducing player: {e})"
+        logger.error("Drop-in generation failed:", exc_info=True)
+
+    state['history'].append({'role': 'assistant', 'content': narration})
+    with open(path, 'w') as f:
+        json.dump(state, f, indent=2)
+
+    await interaction.response.send_message(narration)
+
 @bot.tree.command(name='ping', description='Check the bot\'s latency')
 async def ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)  # Convert to milliseconds
@@ -956,6 +1204,78 @@ async def on_message(message):
     guild_id = message.guild.id
     channel_id = message.channel.id
     channel_path = get_channel_path(guild_id, channel_id)
+    game_path = get_text_game_path(message.guild.id, message.channel.id)
+
+    if os.path.exists(game_path):
+        async with message.channel.typing():
+            # Load game
+            with open(game_path) as f:
+                state = json.load(f)
+
+            # If user not in game, delete message and warn
+            if str(message.author.id) not in state['players']:
+                try:
+                    await message.delete()
+                finally:
+                    await message.channel.send(
+                        f'{message.author.mention} you must use `/drop-in` before playing.',
+                        delete_after=8
+                    )
+                return
+
+            player = state['players'][str(message.author.id)]
+            system_prompt = build_game_system_prompt(state['players'])
+            state['history'].append({
+                'role': 'user',
+                'name': player['name'],
+                'content': message.content
+            })
+
+            # Trim if oversized
+            messages = [{'role': 'system', 'content': system_prompt}] + state['history']
+            max_tokens = 16000
+            current_tokens = await num_tokens_from_messages(messages, state['model'])
+            while current_tokens > max_tokens and len(state['history']) > 0:
+                state['history'].pop(0)
+                messages = [{'role': 'system', 'content': system_prompt}] + state['history']
+                current_tokens = await num_tokens_from_messages(messages, state['model'])
+
+            # Get narrator response
+            try:
+                completion = await client.chat.completions.create(
+                    model=state['model'],
+                    messages=messages,
+                    temperature=0.7
+                )
+                reply = completion.choices[0].message.content
+            except Exception as e:
+                reply = f"(AI error: {e})"
+                logger.error("Adventure narrator failed:", exc_info=True)
+
+            state['history'].append({'role': 'assistant', 'content': reply})
+            with open(game_path, 'w') as f:
+                json.dump(state, f, indent=2)
+
+            # Chunk & send (reuse existing splitter)
+            MAX_CHARS = 1950
+            chunks, current = [], ''
+            for para in reply.split('\n\n'):
+                para = para.strip()
+                if not para:
+                    continue
+                if len(para) > MAX_CHARS:
+                    for sub in [para[i:i+MAX_CHARS] for i in range(0, len(para), MAX_CHARS)]:
+                        if len(current) + len(sub) + 2 > MAX_CHARS:
+                            if current: chunks.append(current.strip()); current = ''
+                        current += sub + '\n\n'
+                else:
+                    if len(current) + len(para) + 2 > MAX_CHARS:
+                        if current: chunks.append(current.strip()); current = ''
+                    current += para + '\n\n'
+            if current.strip(): chunks.append(current.strip())
+            for c in chunks:
+                await message.channel.send(c)
+        return # Adventure processing finished; skip normal chat
     
     if not os.path.exists(channel_path):
         return
