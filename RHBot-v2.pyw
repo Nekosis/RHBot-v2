@@ -1061,17 +1061,19 @@ async def delete_player_card(interaction: discord.Interaction, card_id: str):
 @app_commands.check(is_admin_or_ai_manager)
 @app_commands.describe(card_id='Your player card ID')
 async def start_game(interaction: discord.Interaction, card_id: str):
-    await interaction.response.defer(thinking=True)
     channel_game = get_text_game_path(interaction.guild.id, interaction.channel.id)
+
     if os.path.exists(channel_game):
         await interaction.response.send_message('A game is already running here.', ephemeral=True)
         return
 
-    # Load initiating player card
     pc_path = get_player_card_path(interaction.user.id, card_id)
     if not os.path.exists(pc_path):
         await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
         return
+
+    await interaction.response.defer(thinking=True)
+    
     with open(pc_path) as f:
         pc_data = json.load(f)
 
@@ -1108,7 +1110,7 @@ async def start_game(interaction: discord.Interaction, card_id: str):
     with open(channel_game, 'w') as f:
         json.dump(game_state, f, indent=2)
 
-    await interaction.response.send_message(f"**The adventure begins…**\n{opening}")
+    await interaction.followup.send(f"**The adventure begins…**\n{opening}")
 
 @bot.tree.command(name='reset-game', description='Clear adventure history but keep players')
 @app_commands.check(is_admin_or_ai_manager)
