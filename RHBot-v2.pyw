@@ -1181,7 +1181,8 @@ async def drop_in(interaction: discord.Interaction, card_id: str, style: Optiona
     system_prompt = build_game_system_prompt(state['players'])
     join_msg = (
         f"A new player wishes to join: {pc_data['name']} "
-        f"({pc_data['description'].format(player=pc_data['name'])}). "
+        f"({pc_data['description'].format(player=pc_data['name'],
+                                   Player=pc_data['name'])})."
         + (f"They prefer to enter like this: {style}" if style else "Narrator, choose how they appear.")
     )
     messages = [{'role': 'system', 'content': system_prompt}] + state['history'] + [
