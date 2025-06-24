@@ -1141,9 +1141,11 @@ async def stop_game(interaction: discord.Interaction):
                        style='(Optional) How you want to appear in-story')
 async def drop_in(interaction: discord.Interaction, card_id: str, style: Optional[str] = None):
     path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+
     if not os.path.exists(path):
         await interaction.response.send_message('No game running here.', ephemeral=True)
         return
+
     with open(path) as f:
         state = json.load(f)
 
@@ -1155,6 +1157,9 @@ async def drop_in(interaction: discord.Interaction, card_id: str, style: Optiona
     if not os.path.exists(pc_path):
         await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
         return
+    
+    await interaction.response.defer(thinking=True)
+
     with open(pc_path) as f:
         pc_data = json.load(f)
 
@@ -1191,7 +1196,7 @@ async def drop_in(interaction: discord.Interaction, card_id: str, style: Optiona
     with open(path, 'w') as f:
         json.dump(state, f, indent=2)
 
-    await interaction.response.send_message(narration)
+    await interaction.followup.send(narration)
 
 @bot.tree.command(name='ping', description='Check the bot\'s latency')
 async def ping(interaction: discord.Interaction):
