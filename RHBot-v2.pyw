@@ -1032,12 +1032,22 @@ async def list_player_cards(interaction: discord.Interaction):
     if not os.path.isdir(user_dir):
         await interaction.response.send_message('You have no cards yet.', ephemeral=True)
         return
-    cards = [f[:-5] for f in os.listdir(user_dir) if f.endswith('.json')]
-    msg = '\n'.join(f'- `{c}`' for c in cards) or '*none*'
-    await interaction.response.send_message(
-        f'**Your cards:**\n\n{msg}',
-        ephemeral=True
-    )
+
+    cards_list = []
+    for file in os.listdir(user_dir):
+        if not file.endswith('.json'):
+            continue
+        card_id = file[:-5]
+        try:
+            with open(os.path.join(user_dir, file), 'r') as f:
+                data = json.load(f)
+            name = data.get('name', 'Unnamed Player')
+            cards_list.append(f"- {name} (`{card_id}`)")
+        except Exception:
+            cards_list.append(f"- Corrupted File (`{card_id}`)")
+
+    msg = '\n'.join(cards_list) or '*none*'
+    await interaction.response.send_message(f"**Your cards:**\n{msg}", ephemeral=True)
 
 @bot.tree.command(name='get-player-card-info', description='View one of your player cards')
 @app_commands.describe(card_id='ID of the card you own')
