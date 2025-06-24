@@ -186,10 +186,16 @@ def get_text_game_path(guild_id: int, channel_id: int) -> str:
 
 def build_game_system_prompt(players: dict) -> str:
     """Return a narrator prompt including all active players."""
+    def render(desc: str, name: str) -> str:
+        return (desc
+                .replace('{player}', name)
+                .replace('{Player}', name))
+
     roster = '\n'.join(
-        f"- {p['name']}: {p['description'].format(player=p['name'])}"
+        f"- {p['name']}: {render(p['description'], p['name'])}"
         for p in players.values()
     )
+    
     return (f"You are an imaginative, immersive narrator for a co-operative multiplayer text adventure. Respond **only** as narrative prose, never mentioning game mechanics.\n\n**Active player roster:**\n{roster}\n\nAfter each user input, describe how the world reacts and ask what the players do next.")
 
 def setup_tray_icon():
@@ -1029,7 +1035,7 @@ async def list_player_cards(interaction: discord.Interaction):
     cards = [f[:-5] for f in os.listdir(user_dir) if f.endswith('.json')]
     msg = '\n'.join(f'- `{c}`' for c in cards) or '*none*'
     await interaction.response.send_message(
-        f'**Your cards:**\n{msg}',
+        f'**Your cards:**\n\n{msg}',
         ephemeral=True
     )
 
