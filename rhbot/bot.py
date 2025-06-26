@@ -1,0 +1,1279 @@
+import asyncio
+import datetime
+import json
+import logging
+import os
+import re
+import sys
+import threading
+import uuid
+from typing import Optional
+
+import aiohttp
+import discord
+import discord.ui
+import pystray
+import tiktoken
+import yaml
+from discord import app_commands
+from discord.ext import commands
+from discord.ui import Modal, TextInput
+from openai import AsyncOpenAI
+from PIL import Image
+from plyer import notification
+from transformers import AutoTokenizer
+from .config import logger, DISCORD_TOKEN, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, DEVELOPER_ID, DEVELOPER_USERNAME, DATA_DIR
+from .constants import SYSTEM_PROMPT, CHAR_PROMPT_TEMPLATE, ENCODING_GPT4O, TOKENIZER_WIZARDLM, MODEL_CHOICES
+from .utils import num_tokens_from_messages, get_guild_dir, get_channel_path, get_game_path, get_player_cards_dir, get_player_card_path, get_text_game_path, build_game_system_prompt, setup_tray_icon, is_admin_or_ai_manager, get_ai_manager_role
+client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+
+intents = discord.Intents.default()
+intents.messages = True
+intents.guilds = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix=None, intents=intents)
+
+
+
+
+class StartGameView(discord.ui.View):
+    def __init__(self, guild_id: int, user_id: int, channel: discord.TextChannel):
+        super().__init__(timeout=900)  # 15 minutes in seconds
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.channel = channel
+        
+    async def on_timeout(self):
+        game_path = get_game_path(self.guild_id, self.user_id)
+        if os.path.exists(game_path):
+            os.remove(game_path)
+            await self.channel.send(f"🕒 <@{self.user_id}>'s Monkey's Paw game has expired due to inactivity.")
+
+    @discord.ui.button(label="Make Your First Wish", style=discord.ButtonStyle.primary, custom_id="start_wish")
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Only the game starter can interact!", ephemeral=True)
+            return
+        await interaction.response.send_modal(WishModal(self.user_id, 1))
+
+class RetryView(discord.ui.View):
+    def __init__(self, user_id: int, wish_number: int, guild_id: int, channel: discord.TextChannel):
+        super().__init__(timeout=900)
+        self.user_id = user_id
+        self.wish_number = wish_number
+        self.guild_id = guild_id
+        self.channel = channel
+
+    async def on_timeout(self):
+        game_path = get_game_path(self.guild_id, self.user_id)
+        if os.path.exists(game_path):
+            os.remove(game_path)
+            await self.channel.send(f"🕒 <@{self.user_id}>'s Monkey's Paw game has expired due to inactivity.")
+
+    @discord.ui.button(label="Try Again", style=discord.ButtonStyle.danger, custom_id="retry_wish")
+    async def retry_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You're not the player!", ephemeral=True)
+            return
+        await interaction.response.send_modal(WishModal(self.user_id, self.wish_number))
+
+class NextWishView(discord.ui.View):
+    def __init__(self, user_id: int, wish_number: int, guild_id: int, channel: discord.TextChannel):
+        super().__init__(timeout=900)
+        self.user_id = user_id
+        self.wish_number = wish_number
+        self.guild_id = guild_id
+        self.channel = channel
+
+    async def on_timeout(self):
+        game_path = get_game_path(self.guild_id, self.user_id)
+        if os.path.exists(game_path):
+            os.remove(game_path)
+            await self.channel.send(f"🕒 <@{self.user_id}>'s Monkey's Paw game has expired due to inactivity.")
+
+    @discord.ui.button(label="Make Next Wish", style=discord.ButtonStyle.primary, custom_id=f"next_wish")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Only the player can continue!", ephemeral=True)
+            return
+        await interaction.response.send_modal(WishModal(self.user_id, self.wish_number))
+
+class WishModal(Modal):
+    def __init__(self, user_id: int, wish_number: int):
+        super().__init__(title=f"Wish #{wish_number}")
+        self.user_id = user_id
+        self.wish_number = wish_number
+        self.wish_input = TextInput(
+            label=f"Your Wish (Be Careful!)",
+            style=discord.TextStyle.long,
+            placeholder="I wish for unlimited wealth...",
+            required=True
+        )
+        self.add_item(self.wish_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        wish = self.wish_input.value.strip()
+        
+        # Load game data
+        game_path = get_game_path(interaction.guild.id, self.user_id)
+        try:
+            with open(game_path, 'r') as f:
+                game_data = json.load(f)
+        except FileNotFoundError:
+            await interaction.followup.send("❌ Game not found! Start a new one with `/monkeys-paw`.", ephemeral=True)
+            return
+            
+        # Build context-aware validation prompt
+        previous_wishes = [entry['wish'] for entry in game_data['history']]
+    
+        # Validate wish
+        if previous_wishes:
+            context = "\n\nThe user has made these prior wishes:\n- " + "\n- ".join(previous_wishes)
+            system_msg = f"You are a concise but fair AI that determines if an input is a valid \"wish\" for a Monkey's Paw game.{context}\n\nA valid wish is a sentence where the speaker asks for something to happen, change, be known, or be granted. The message must express a clear desire. Do not allow vague comments or unrelated questions. Only reply with \"yes\" or \"no\" in all lowercase with no punctuation. Do not explain or elaborate."
+        else:
+            system_msg = "You are a concise but fair AI that determines if an input is a valid \"wish\" for a Monkey's Paw game. A valid wish is a sentence where the speaker asks for something to happen, change, be known, or be granted. The message must express a clear desire. Do not allow vague comments or unrelated questions. Only reply with \"yes\" or \"no\" in all lowercase with no punctuation. Do not explain or elaborate."
+        
+        validation_prompt = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": wish}
+        ]
+        
+        try:
+            validation = await client.chat.completions.create(
+                model="anthropic/claude-3.5-haiku",
+                messages=validation_prompt,
+                temperature=0.7
+            )
+            raw_response = validation.choices[0].message.content.strip().lower()
+            
+            if raw_response == "yes":
+                valid = True
+            elif raw_response == "no":
+                valid = False
+            else:
+                # Log unexpected response but still reject
+                logger.warning("Unexpected validation response for wish \"%s\": \"%s\"", wish, raw_response)
+                valid = False
+        except Exception as e:
+            logger.error("Validation failed:", exc_info=True)
+            valid = False
+
+        if not valid:
+            await interaction.followup.send(
+                "⚠️ That's not a valid wish! Be explicit about what you want to happen/changed.\n-# Having trouble? Make sure you're using \"I wish\".",
+                view=RetryView(
+                    self.user_id, 
+                    self.wish_number,
+                    interaction.guild.id,
+                    interaction.channel
+                ),
+                ephemeral=True
+            )
+            return
+        
+        # Get user alias
+        aliases_path = os.path.join(DATA_DIR, 'aliases.json')
+        try:
+            with open(aliases_path, 'r') as f:
+                aliases = json.load(f)
+        except FileNotFoundError:
+            aliases = {}
+        display_name = aliases.get(str(self.user_id), interaction.user.name)
+
+        # Prepare system prompt
+        system_prompt = f"""You are The Monkey's Paw, a mysterious, mischievous, and powerful entity that grants wishes with unintended and ironic consequences. The user ({display_name}) can make up to 5 wishes in a single game. All events take place in the same persistent universe, so earlier wishes may impact future ones. When a wish is made, you must interpret the user's wording literally or cleverly, then grant the wish with a twist—this twist must be logical, ironic, or darkly humorous. You should maintain narrative consistency across all 5 wishes and keep track of previous wishes and their consequences. After the fifth wish, end the session with a dramatic conclusion that wraps up the story arc. Respond in vivid storytelling prose, as if narrating events from a cursed folktale. Include subtle hints of foreshadowing."""
+        
+        # Build message history
+        messages = [{"role": "system", "content": system_prompt}]
+        for idx, entry in enumerate(game_data['history']):
+            messages.append({"role": "user", "content": entry['wish']})
+            messages.append({"role": "assistant", "content": entry['response']})
+        messages.append({"role": "user", "content": wish})
+
+        # Generate response
+        async with interaction.channel.typing():
+            try:
+                completion = await client.chat.completions.create(
+                    model="openai/gpt-4o",
+                    messages=messages,
+                    temperature=0.7
+                )
+                response = completion.choices[0].message.content
+            except Exception as e:
+                logger.error("Response generation failed:", exc_info=True)
+                response = f"🔥 The Paw trembles... An error occurred: {str(e)}"
+
+        # Update game data
+        game_data['history'].append({"wish": wish, "response": response})
+        game_data['count'] += 1
+        with open(game_path, 'w') as f:
+            json.dump(game_data, f)
+
+        # Send public response in chunks
+        full_message = (
+            f"**✨ Wish #{game_data['count']} from {interaction.user.mention}:**\n{wish}\n\n"
+            f"**🌀 The Monkey's Paw decrees...**\n{response}"
+        )
+        
+        # Split response into chunks
+        MAX_CHARS = 1950
+        chunks = []
+        current_chunk = ""
+
+        # Split by paragraphs and process each
+        for paragraph in full_message.split('\n\n'):
+            # Clean up any leading/trailing whitespace in the paragraph
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            
+            # Check if the entire paragraph is too long on its own
+            if len(paragraph) > MAX_CHARS:
+                # Split this long paragraph into character-limited chunks
+                sub_chunks = [paragraph[i:i+MAX_CHARS] for i in range(0, len(paragraph), MAX_CHARS)]
+                for sub in sub_chunks:
+                    if len(current_chunk) + len(sub) + 2 > MAX_CHARS:  # +2 for newlines
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                            current_chunk = ""
+                        chunks.append(sub.strip())
+                    else:
+                        current_chunk += sub + '\n\n'
+            else:
+                # Check if adding this paragraph would exceed the limit
+                if len(current_chunk) + len(paragraph) + 2 > MAX_CHARS:  # +2 for newlines
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                        current_chunk = ""
+                current_chunk += paragraph + '\n\n'
+
+        # Add remaining content
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        # Final safety check for edge cases
+        final_chunks = []
+        for chunk in chunks:
+            if len(chunk) > 2000:
+                # Split into 2000-char chunks if any slipped through
+                final_chunks.extend([chunk[i:i+2000] for i in range(0, len(chunk), 2000)])
+            else:
+                final_chunks.append(chunk)
+        chunks = final_chunks
+
+        # Send all chunks
+        for chunk in chunks:
+            await interaction.channel.send(chunk)
+
+        # Check game end
+        if game_data['count'] >= 5:
+            os.remove(game_path)
+            await interaction.followup.send("🌑 The game concludes... The Paw falls silent. Use `/monkeys-paw` to begin anew.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"💫 You have {5 - game_data['count']} wishes remaining...",
+                view=NextWishView(
+                    self.user_id, 
+                    game_data['count'] + 1,
+                    interaction.guild.id,
+                    interaction.channel
+                ),
+                ephemeral=True
+            )
+
+class CreateCharacterModal(Modal, title='Create Character'):
+    def __init__(self):
+        super().__init__()
+        self.name = TextInput(
+            label='Character Name',
+            placeholder='Enter the character\'s name...',
+            required=True,
+            max_length=100
+        )
+        self.description = TextInput(
+            label='Character Description',
+            style=discord.TextStyle.long,
+            placeholder='Describe the character\'s personality and behavior...',
+            required=True
+        )
+        self.char_id = TextInput(
+            label='Character ID',
+            placeholder='Unique identifier (lowercase, numbers, hyphens only)',
+            required=True,
+            max_length=32
+        )
+        self.add_item(self.name)
+        self.add_item(self.description)
+        self.add_item(self.char_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Validate Character ID
+        char_id = self.char_id.value.strip()
+        if not re.match(r'^[a-z0-9\-]+$', char_id):
+            await interaction.response.send_message(
+                'Invalid Character ID! Only lowercase letters, numbers, and hyphens allowed.',
+                ephemeral=True
+            )
+            return
+
+        # Check if ID exists
+        chars_dir = os.path.join(DATA_DIR, 'chars')
+        os.makedirs(chars_dir, exist_ok=True)
+        char_path = os.path.join(chars_dir, f'{char_id}.json')
+        if os.path.exists(char_path):
+            await interaction.response.send_message(
+                'Character ID already exists! Please choose a different one.',
+                ephemeral=True
+            )
+            return
+
+        # Save character data
+        char_data = {
+            'name': self.name.value,
+            'description': self.description.value,
+            'creator_id': interaction.user.id,
+            'created_at': str(discord.utils.utcnow())
+        }
+        with open(char_path, 'w') as f:
+            json.dump(char_data, f, indent=2)
+
+        await interaction.response.send_message(
+            f'Character "{self.name.value}" created with ID `{char_id}`!',
+            ephemeral=True
+        )
+
+class CreatePlayerCardModal(Modal, title='Create Player Card'):
+    def __init__(self):
+        super().__init__()
+        self.name = TextInput(
+            label='Player Name',
+            max_length=100,
+            required=True,
+            placeholder='Enter the player\'s name...'
+        )
+        self.description = TextInput(
+            label='Player Description',
+            style=discord.TextStyle.long,
+            required=True,
+            placeholder='Describe the player (use {player} to insert the player\'s name)...'
+        )
+        self.card_id = TextInput(
+            label='Card ID',
+            max_length=32,
+            required=True,
+            placeholder='Unique identifier (lowercase, numbers, hyphens only)'
+        )
+        self.add_item(self.name)
+        self.add_item(self.description)
+        self.add_item(self.card_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cid = self.card_id.value.strip()
+        if not re.match(r'^[a-z0-9\-]+$', cid):
+            await interaction.response.send_message(
+                'Card ID may only contain lowercase letters, numbers and hyphens.',
+                ephemeral=True
+            )
+            return
+
+        user_dir = get_player_cards_dir(interaction.user.id)
+        os.makedirs(user_dir, exist_ok=True)
+        card_path = get_player_card_path(interaction.user.id, cid)
+        if os.path.exists(card_path):
+            await interaction.response.send_message(
+                'You already have a card with that ID.',
+                ephemeral=True
+            )
+            return
+
+        with open(card_path, 'w') as f:
+            json.dump({
+                'name': self.name.value,
+                'description': self.description.value,
+                'created_at': str(discord.utils.utcnow())
+            }, f, indent=2)
+
+        await interaction.response.send_message(
+            f'Player card {self.name.value} saved as `{cid}`!',
+            ephemeral=True
+        )
+
+class DeleteConfirmView(discord.ui.View):
+    def __init__(self, character_id: str):
+        super().__init__(timeout=30)
+        self.character_id = character_id
+        self.confirmed = False
+
+    @discord.ui.button(label='Confirm Delete', style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        self.stop()
+        await interaction.response.send_message(f'Character `{self.character_id}` deleted!', ephemeral=True)
+
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.send_message('Deletion cancelled.', ephemeral=True)
+
+    async def on_timeout(self):
+        self.stop()
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
+):
+    if isinstance(error, app_commands.CheckFailure):
+        # Send ephemeral error message
+        await interaction.response.send_message(
+            str(error),
+            ephemeral=True
+        )
+    else:
+        # Log other errors
+        logger.error("Command error:", exc_info=error)
+
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+
+    try:
+        # Send desktop notification
+        notification.notify(
+            title='RHBot-v2 Online',
+            message=f'Logged in as {bot.user.name} (ID: {bot.user.id})',
+            app_name='RHBot-v2',
+            timeout=10
+        )
+    except Exception as e:
+        logger.error(f"Failed to send startup notification:", exc_info=True)
+
+@bot.event
+async def on_guild_join(guild):
+    guild_dir = get_guild_dir(guild.id)
+    os.makedirs(guild_dir, exist_ok=True)
+
+@bot.tree.command(name='set-ai-manager-role', description='Set the role that can manage the AI')
+@app_commands.check(is_admin_or_ai_manager)
+async def set_ai_manager_role(interaction: discord.Interaction, role: discord.Role):
+    guild_id = interaction.guild.id
+    role_file = os.path.join(get_guild_dir(guild_id), 'ai_manager_role.json')
+    
+    os.makedirs(os.path.dirname(role_file), exist_ok=True)
+    with open(role_file, 'w') as f:
+        json.dump({'role_id': role.id}, f)
+    
+    await interaction.response.send_message(f'AI Manager role set to {role.mention}!', ephemeral=True)
+
+@bot.tree.command(name='activate', description='Activate AI in this channel')
+@app_commands.check(is_admin_or_ai_manager)
+@app_commands.describe(model='The AI model to use (default: GPT-4o)')
+@app_commands.choices(model=MODEL_CHOICES)
+async def activate(interaction: discord.Interaction, model: Optional[str] = None):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+    
+    if os.path.exists(channel_path):
+        await interaction.response.send_message('This channel is already activated!')
+        return
+    
+    model = model or 'openai/gpt-4o'
+    os.makedirs(os.path.dirname(channel_path), exist_ok=True)
+    with open(channel_path, 'w') as f:
+        json.dump({'is_character': False, 'history': [], 'model': model, 'aliases': {}}, f)
+    
+    await interaction.response.send_message(f'Channel activated using `{model}`! RHBot-v2 will now respond here.')
+
+@bot.tree.command(name='wack', description='Wipe conversation history')
+@app_commands.check(is_admin_or_ai_manager)
+async def wack(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+    
+    if not os.path.exists(channel_path):
+        await interaction.response.send_message('Channel is not active!')
+        return
+    
+    with open(channel_path, 'r') as f:
+        channel_data = json.load(f)
+    
+    channel_data['history'] = []
+    
+    with open(channel_path, 'w') as f:
+        json.dump(channel_data, f)
+    
+    await interaction.response.send_message('Conversation history wiped!')
+
+@bot.tree.command(name='deactivate', description='Deactivate AI in this channel')
+@app_commands.check(is_admin_or_ai_manager)
+async def deactivate(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+    
+    if not os.path.exists(channel_path):
+        await interaction.response.send_message('Channel is not active!')
+        return
+    
+    os.remove(channel_path)
+    await interaction.response.send_message('Channel deactivated!')
+
+@bot.tree.command(name='set-alias', description='Set your global alias')
+@app_commands.describe(alias='The alias to use for your username (max 32 characters)')
+async def set_alias(interaction: discord.Interaction, alias: str):
+    if len(alias) > 32:
+        await interaction.response.send_message('Alias must be 32 characters or less!', ephemeral=True)
+        return
+    # Prevent non-developers from using the developer's alias
+    if alias == DEVELOPER_USERNAME and interaction.user.id != DEVELOPER_ID:
+        await interaction.response.send_message('You are not allowed to use this alias.', ephemeral=True)
+        return
+    
+    aliases_path = os.path.join(DATA_DIR, 'aliases.json')
+    try:
+        with open(aliases_path, 'r') as f:
+            aliases = json.load(f)
+    except FileNotFoundError:
+        aliases = {}
+    
+    user_id = str(interaction.user.id)
+    aliases[user_id] = alias
+    
+    with open(aliases_path, 'w') as f:
+        json.dump(aliases, f, indent=2)
+    
+    await interaction.response.send_message(f'Alias set to: `{alias}`', ephemeral=True)
+
+@bot.tree.command(name='remove-alias', description='Remove your global alias')
+async def remove_alias(interaction: discord.Interaction):
+    aliases_path = os.path.join(DATA_DIR, 'aliases.json')
+    try:
+        with open(aliases_path, 'r') as f:
+            aliases = json.load(f)
+    except FileNotFoundError:
+        aliases = {}
+    
+    user_id = str(interaction.user.id)
+    if user_id in aliases:
+        del aliases[user_id]
+        with open(aliases_path, 'w') as f:
+            json.dump(aliases, f, indent=2)
+        await interaction.response.send_message('Alias removed.', ephemeral=True)
+    else:
+        await interaction.response.send_message('You don\'t have an alias set.', ephemeral=True)
+
+@bot.tree.command(name='set-channel-alias', description='Set your alias for this channel (channel must be activated)')
+@app_commands.describe(alias='The alias to use in this channel (max 32 characters)')
+async def set_channel_alias(interaction: discord.Interaction, alias: str):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+    
+    if not os.path.exists(channel_path):
+        await interaction.response.send_message('Channel is not activated!', ephemeral=True)
+        return
+    
+    if len(alias) > 32:
+        await interaction.response.send_message('Alias must be 32 characters or less!', ephemeral=True)
+        return
+    if alias == DEVELOPER_USERNAME and interaction.user.id != DEVELOPER_ID:
+        await interaction.response.send_message('You are not allowed to use this alias.', ephemeral=True)
+        return
+    
+    with open(channel_path, 'r') as f:
+        channel_data = json.load(f)
+    
+    if 'aliases' not in channel_data:
+        channel_data['aliases'] = {}
+    
+    user_id = str(interaction.user.id)
+    channel_data['aliases'][user_id] = alias
+    
+    with open(channel_path, 'w') as f:
+        json.dump(channel_data, f)
+    
+    await interaction.response.send_message(f'Channel alias set to: `{alias}`', ephemeral=True)
+
+@bot.tree.command(name='remove-channel-alias', description='Remove your alias for this channel')
+async def remove_channel_alias(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+    
+    if not os.path.exists(channel_path):
+        await interaction.response.send_message('Channel is not activated!', ephemeral=True)
+        return
+    
+    with open(channel_path, 'r') as f:
+        channel_data = json.load(f)
+    
+    user_id = str(interaction.user.id)
+    if 'aliases' in channel_data and user_id in channel_data['aliases']:
+        del channel_data['aliases'][user_id]
+        with open(channel_path, 'w') as f:
+            json.dump(channel_data, f)
+        await interaction.response.send_message('Channel alias removed.', ephemeral=True)
+    else:
+        await interaction.response.send_message('You don\'t have a channel alias set.', ephemeral=True)
+
+@bot.tree.command(name="monkeys-paw", description="Begin a dangerous game of wishes")
+async def monkeys_paw(interaction: discord.Interaction):
+    game_path = get_game_path(interaction.guild.id, interaction.user.id)
+    if os.path.exists(game_path):
+        await interaction.response.send_message("⚠️ You already have an active game! Finish or abort it first.", ephemeral=True)
+        return
+
+    os.makedirs(os.path.dirname(game_path), exist_ok=True)
+    with open(game_path, 'w') as f:
+        json.dump({"history": [], "count": 0}, f)
+
+    rules = (
+        "**🪶 The Monkey's Paw Rules**\n"
+        "1. You get 5 wishes\n"
+        "2. Each wish WILL be granted with ironic consequences\n"
+        "3. No takesies-backsies\n"
+        "4. The Paw's decisions are final\n\n"
+        "Click below to make your first wish..."
+    )
+    await interaction.response.send_message(
+        rules, 
+        view=StartGameView(interaction.guild.id, interaction.user.id, interaction.channel)
+    )
+
+@bot.tree.command(name="monkeys-paw-abort", description="End your current Monkey's Paw game")
+async def monkeys_paw_abort(interaction: discord.Interaction):
+    game_path = get_game_path(interaction.guild.id, interaction.user.id)
+    if not os.path.exists(game_path):
+        await interaction.response.send_message("❌ No active game to abort!", ephemeral=True)
+        return
+    
+    os.remove(game_path)
+    await interaction.response.send_message("⚰️ The Paw's power fades... Game aborted.", ephemeral=True)
+    
+@bot.tree.command(name='create-character', description='Create a new RP character for the bot to embody')
+async def create_character(interaction: discord.Interaction):
+    await interaction.response.send_modal(CreateCharacterModal())
+
+@bot.tree.command(name='activate-character', description='Activate a character in this channel')
+@app_commands.check(is_admin_or_ai_manager)
+@app_commands.describe(
+    character_id='The ID of the character to activate',
+    model='The AI model to use (default: GPT-4o)'
+)
+@app_commands.choices(model=MODEL_CHOICES)
+async def activate_character(interaction: discord.Interaction, character_id: str, model: Optional[str] = None):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+
+    # Check existing activation
+    if os.path.exists(channel_path):
+        await interaction.response.send_message(
+            'Channel is already activated! Deactivate first.',
+            ephemeral=True
+        )
+        return
+
+    # Verify character exists
+    char_path = os.path.join(DATA_DIR, 'chars', f'{character_id}.json')
+    if not os.path.exists(char_path):
+        await interaction.response.send_message(
+            'Character not found! Check the ID with `/list-characters`.',
+            ephemeral=True
+        )
+        return
+
+    # Create activation with character marker
+    model = model or 'openai/gpt-4o'
+    os.makedirs(os.path.dirname(channel_path), exist_ok=True)
+    with open(channel_path, 'w') as f:
+        json.dump({
+            'is_character': True,
+            'character_id': character_id,
+            'history': [],
+            'model': model,
+            'aliases': {}
+        }, f)
+
+    await interaction.response.send_message(f'Channel activated with character `{character_id}` using `{model}`!')
+
+@bot.tree.command(name='list-characters', description='List all available characters')
+@app_commands.check(is_admin_or_ai_manager)
+async def list_characters(interaction: discord.Interaction):
+    chars_dir = os.path.join(DATA_DIR, 'chars')
+    try:
+        char_files = os.listdir(chars_dir)
+    except FileNotFoundError:
+        char_files = []
+
+    if not char_files:
+        await interaction.response.send_message('No characters found!', ephemeral=True)
+        return
+
+    chars_list = []
+    for f in char_files:
+        if not f.endswith('.json'):
+            continue
+        char_id = f[:-5]
+        try:
+            with open(os.path.join(chars_dir, f), 'r') as cf:
+                char_data = json.load(cf)
+            name = char_data.get('name', 'Unnamed Character')
+            chars_list.append(f"- {name} (`{char_id}`)")
+        except:
+            chars_list.append(f"- Corrupted File (`{char_id}`)")
+
+    await interaction.response.send_message(
+        f'**Available Characters:**\n' + '\n'.join(chars_list),
+        ephemeral=True
+    )
+    
+@bot.tree.command(name='get-character-info', description='Get detailed information about a character')
+@app_commands.describe(character_id='The ID of the character to inspect')
+async def get_character_info(interaction: discord.Interaction, character_id: str):
+    char_path = os.path.join(DATA_DIR, 'chars', f'{character_id}.json')
+    if not os.path.exists(char_path):
+        await interaction.response.send_message('Character not found!', ephemeral=True)
+        return
+
+    try:
+        with open(char_path, 'r') as f:
+            char_data = json.load(f)
+        
+        # Send initial information without the description content
+        initial_info = (
+            f"Name: `{char_data['name']}`\n"
+            f"ID: `{character_id}`\n"
+            f"Creator ID: `{char_data['creator_id']}`\n"
+            f"Created At: `{char_data['created_at']}`\n"
+            "Description:"
+        )
+        await interaction.response.send_message(initial_info, ephemeral=True)
+        
+        # Split description into chunks of 1950 characters each (to fit code blocks)
+        description = char_data['description']
+        chunk_size = 1950
+        chunks = [
+            description[i:i + chunk_size]
+            for i in range(0, len(description), chunk_size)
+        ]
+        
+        # Send each chunk as a follow-up code block
+        for chunk in chunks:
+            code_block = f"```plaintext\n{chunk}\n```"
+            await interaction.followup.send(code_block, ephemeral=True)
+            
+    except Exception as e:
+        logger.error("Error loading character:", exc_info=True)
+        await interaction.response.send_message(f'Error loading character: {str(e)}', ephemeral=True)
+
+@bot.tree.command(name='delete-character', description='Delete a character definition')
+@app_commands.check(is_admin_or_ai_manager)
+@app_commands.describe(character_id='The ID of the character to delete')
+async def delete_character(interaction: discord.Interaction, character_id: str):
+    char_path = os.path.join(DATA_DIR, 'chars', f'{character_id}.json')
+    if not os.path.exists(char_path):
+        await interaction.response.send_message('Character not found!', ephemeral=True)
+        return
+
+    view = DeleteConfirmView(character_id)
+    await interaction.response.send_message(
+        f'Are you sure you want to delete character `{character_id}`? This cannot be undone!',
+        view=view,
+        ephemeral=True
+    )
+    await view.wait()
+    
+    if view.confirmed:
+        try:
+            os.remove(char_path)
+        except Exception as e:
+            logger.error(f"Error deleting character {character_id}:", exc_info=True)
+            await interaction.followup.send(f'Error deleting character: {str(e)}', ephemeral=True)
+
+@bot.tree.command(name='create-player-card', description='Create a player card for text adventures')
+async def create_player_card(interaction: discord.Interaction):
+    await interaction.response.send_modal(CreatePlayerCardModal())
+
+@bot.tree.command(name='list-player-cards', description='List your player cards')
+async def list_player_cards(interaction: discord.Interaction):
+    user_dir = get_player_cards_dir(interaction.user.id)
+    if not os.path.isdir(user_dir):
+        await interaction.response.send_message('You have no cards yet.', ephemeral=True)
+        return
+
+    cards_list = []
+    for file in os.listdir(user_dir):
+        if not file.endswith('.json'):
+            continue
+        card_id = file[:-5]
+        try:
+            with open(os.path.join(user_dir, file), 'r') as f:
+                data = json.load(f)
+            name = data.get('name', 'Unnamed Player')
+            cards_list.append(f"- {name} (`{card_id}`)")
+        except Exception:
+            cards_list.append(f"- Corrupted File (`{card_id}`)")
+
+    msg = '\n'.join(cards_list) or '*none*'
+    await interaction.response.send_message(f"**Your cards:**\n{msg}", ephemeral=True)
+
+@bot.tree.command(name='get-player-card-info', description='View one of your player cards')
+@app_commands.describe(card_id='ID of the card you own')
+async def get_player_card_info(interaction: discord.Interaction, card_id: str):
+    path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('Card not found.', ephemeral=True)
+        return
+    with open(path) as f:
+        data = json.load(f)
+    await interaction.response.send_message(
+        f"Name: {data['name']}\nID: `{card_id}`\nCreated: {data['created_at']}\nDescription:\n```{data['description']}```",
+        ephemeral=True
+    )
+
+@bot.tree.command(name='delete-player-card', description='Delete one of your player cards')
+@app_commands.describe(card_id='ID of the card to delete')
+async def delete_player_card(interaction: discord.Interaction, card_id: str):
+    path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('Card not found.', ephemeral=True)
+        return
+    os.remove(path)
+    await interaction.response.send_message(f'Deleted card `{card_id}`.', ephemeral=True)
+
+@bot.tree.command(name='start-game', description='Begin a multiplayer text adventure in this channel')
+@app_commands.check(is_admin_or_ai_manager)
+@app_commands.describe(card_id='Your player card ID')
+async def start_game(interaction: discord.Interaction, card_id: str):
+    channel_game = get_text_game_path(interaction.guild.id, interaction.channel.id)
+
+    if os.path.exists(channel_game):
+        await interaction.response.send_message('A game is already running here.', ephemeral=True)
+        return
+
+    pc_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(pc_path):
+        await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    
+    with open(pc_path) as f:
+        pc_data = json.load(f)
+
+    # Initial game state
+    game_state = {
+        'players': {
+            str(interaction.user.id): {
+                'name': pc_data['name'],
+                'description': pc_data['description'],
+                'card_id': card_id,
+                'joined_at': str(discord.utils.utcnow())
+            }
+        },
+        'history': [], # Chat history for the narrator
+        'model': 'openai/gpt-4o'
+    }
+    os.makedirs(os.path.dirname(channel_game), exist_ok=True)
+
+    # Generate opening scene
+    system_prompt = build_game_system_prompt(game_state['players'])
+    try:
+        completion = await client.chat.completions.create(
+            model=game_state['model'],
+            messages=[{'role': 'system', 'content': system_prompt}],
+            temperature=0.7
+        )
+        opening = completion.choices[0].message.content
+    except Exception as e:
+        opening = f"(AI failure starting game: {e})"
+        logger.error("Text-adventure opening failed:", exc_info=True)
+
+    # Save and send
+    game_state['history'].append({'role': 'assistant', 'content': opening})
+    with open(channel_game, 'w') as f:
+        json.dump(game_state, f, indent=2)
+
+    await interaction.followup.send(f"**The adventure begins…**\n{opening}")
+
+@bot.tree.command(name='reset-game', description='Clear adventure history but keep players')
+@app_commands.check(is_admin_or_ai_manager)
+async def reset_game(interaction: discord.Interaction):
+    path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('No game active.', ephemeral=True)
+        return
+    with open(path) as f:
+        state = json.load(f)
+    state['history'] = []
+    with open(path, 'w') as f:
+        json.dump(state, f, indent=2)
+    await interaction.response.send_message('History wiped. Narrator memory is fresh.')
+
+@bot.tree.command(name='stop-game', description='Stop the text adventure and wipe history')
+@app_commands.check(is_admin_or_ai_manager)
+async def stop_game(interaction: discord.Interaction):
+    path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+    if not os.path.exists(path):
+        await interaction.response.send_message('No game active.', ephemeral=True)
+        return
+    os.remove(path)
+    await interaction.response.send_message('Game ended and history deleted.')
+
+@bot.tree.command(name='drop-in', description='Join the current adventure')
+@app_commands.describe(card_id='Your player card ID',
+                       style='(Optional) How you want to appear in-story')
+async def drop_in(interaction: discord.Interaction, card_id: str, style: Optional[str] = None):
+    path = get_text_game_path(interaction.guild.id, interaction.channel.id)
+
+    if not os.path.exists(path):
+        await interaction.response.send_message('No game running here.', ephemeral=True)
+        return
+
+    with open(path) as f:
+        state = json.load(f)
+
+    if str(interaction.user.id) in state['players']:
+        await interaction.response.send_message('You are already in the game.', ephemeral=True)
+        return
+
+    pc_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(pc_path):
+        await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
+        return
+    
+    await interaction.response.defer(thinking=True)
+
+    with open(pc_path) as f:
+        pc_data = json.load(f)
+
+    # Add player
+    state['players'][str(interaction.user.id)] = {
+        'name': pc_data['name'],
+        'description': pc_data['description'],
+        'card_id': card_id,
+        'joined_at': str(discord.utils.utcnow())
+    }
+
+    # Ask narrator to weave them in
+    system_prompt = build_game_system_prompt(state['players'])
+    join_msg = (
+        f"A new player wishes to join: {pc_data['name']} "
+        f"({pc_data['description'].format(player=pc_data['name'],
+                                   Player=pc_data['name'])})."
+        + (f"They prefer to enter like this: {style}" if style else "Narrator, choose how they appear.")
+    )
+    messages = [{'role': 'system', 'content': system_prompt}] + state['history'] + [
+        {'role': 'user', 'content': join_msg}
+    ]
+    try:
+        completion = await client.chat.completions.create(
+            model=state['model'],
+            messages=messages,
+            temperature=0.7
+        )
+        narration = completion.choices[0].message.content
+    except Exception as e:
+        narration = f"(AI error introducing player: {e})"
+        logger.error("Drop-in generation failed:", exc_info=True)
+
+    state['history'].append({'role': 'assistant', 'content': narration})
+    with open(path, 'w') as f:
+        json.dump(state, f, indent=2)
+
+    await interaction.followup.send(narration)
+
+@bot.tree.command(name='ping', description='Check the bot\'s latency')
+async def ping(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000)  # Convert to milliseconds
+    await interaction.response.send_message(f'Pong! :3 ({latency}ms)')
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    if not message.guild:
+        return
+    
+    guild_id = message.guild.id
+    channel_id = message.channel.id
+    channel_path = get_channel_path(guild_id, channel_id)
+    game_path = get_text_game_path(message.guild.id, message.channel.id)
+
+    if os.path.exists(game_path):
+        async with message.channel.typing():
+            # Load game
+            with open(game_path) as f:
+                state = json.load(f)
+
+            # If user not in game, delete message and warn
+            if str(message.author.id) not in state['players']:
+                try:
+                    await message.delete()
+                finally:
+                    await message.channel.send(
+                        f'{message.author.mention} you must use `/drop-in` before playing.',
+                        delete_after=8
+                    )
+                return
+
+            player = state['players'][str(message.author.id)]
+            system_prompt = build_game_system_prompt(state['players'])
+            state['history'].append({
+                'role': 'user',
+                'name': player['name'],
+                'content': message.content
+            })
+
+            # Trim if oversized
+            messages = [{'role': 'system', 'content': system_prompt}] + state['history']
+            max_tokens = 16000
+            current_tokens = await num_tokens_from_messages(messages, state['model'])
+            while current_tokens > max_tokens and len(state['history']) > 0:
+                state['history'].pop(0)
+                messages = [{'role': 'system', 'content': system_prompt}] + state['history']
+                current_tokens = await num_tokens_from_messages(messages, state['model'])
+
+            # Get narrator response
+            try:
+                completion = await client.chat.completions.create(
+                    model=state['model'],
+                    messages=messages,
+                    temperature=0.7
+                )
+                reply = completion.choices[0].message.content
+            except Exception as e:
+                reply = f"(AI error: {e})"
+                logger.error("Adventure narrator failed:", exc_info=True)
+
+            state['history'].append({'role': 'assistant', 'content': reply})
+            with open(game_path, 'w') as f:
+                json.dump(state, f, indent=2)
+
+            # Chunk & send (reuse existing splitter)
+            MAX_CHARS = 1950
+            chunks, current = [], ''
+            for para in reply.split('\n\n'):
+                para = para.strip()
+                if not para:
+                    continue
+                if len(para) > MAX_CHARS:
+                    for sub in [para[i:i+MAX_CHARS] for i in range(0, len(para), MAX_CHARS)]:
+                        if len(current) + len(sub) + 2 > MAX_CHARS:
+                            if current: chunks.append(current.strip()); current = ''
+                        current += sub + '\n\n'
+                else:
+                    if len(current) + len(para) + 2 > MAX_CHARS:
+                        if current: chunks.append(current.strip()); current = ''
+                    current += para + '\n\n'
+            if current.strip(): chunks.append(current.strip())
+            for c in chunks:
+                await message.channel.send(c)
+        return # Adventure processing finished; skip normal chat
+    
+    if not os.path.exists(channel_path):
+        return
+    
+    async with message.channel.typing():
+        try:
+            with open(channel_path, 'r') as f:
+                channel_data = json.load(f)
+            
+            # Load global aliases
+            aliases_path = os.path.join(DATA_DIR, 'aliases.json')
+            try:
+                with open(aliases_path, 'r') as f:
+                    aliases = json.load(f)
+            except FileNotFoundError:
+                aliases = {}
+            
+            # Get channel-specific aliases
+            channel_aliases = channel_data.get('aliases', {})
+            user_id = str(message.author.id)
+            display_name = channel_aliases.get(user_id, aliases.get(user_id, message.author.name))
+            
+            # Prevent impersonation by checking display name and user ID
+            if display_name == DEVELOPER_USERNAME and message.author.id != DEVELOPER_ID:
+                display_name = message.author.name  # Revert to actual username
+
+            history = channel_data['history']
+            is_character = channel_data.get('is_character', False)
+            char_id = channel_data.get('character_id', None)
+
+            original_content = message.content
+            alt_texts = []
+
+            # Process each image attachment
+            for attachment in message.attachments:
+                if attachment.content_type and attachment.content_type.startswith('image/'):
+                    # Prepare vision model request
+                    messages_vision = [
+                        {
+                            "role": "system",
+                            "content": "You are a visual analysis model specialized in generating comprehensive alt text descriptions for images. Your task is to produce highly detailed, exhaustive, and objective alt text for any given image. Your description will be used by another language model to interpret the image, so accuracy and completeness are critical. Include every visible element in the image—no matter how minor—including people, objects, colors, backgrounds, facial expressions, actions, and spatial relationships. If there is any visible text in the image, transcribe it exactly as it appears. Do not summarize, infer, or omit any details. Output only the alt text. Do not include introductions, explanations, or formatting beyond plain text—do not wrap your response in code blocks, Markdown, or any formatting syntax."
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Describe this image in detail for alt text."},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": attachment.url}
+                                }
+                            ]
+                        }
+                    ]
+                    try:
+                        completion_vision = await client.chat.completions.create(
+                            model="openai/gpt-4o",
+                            messages=messages_vision,
+                            temperature=0.7
+                        )
+                        alt_text = completion_vision.choices[0].message.content
+                        alt_texts.append(alt_text)
+                    except Exception as e:
+                        logger.error("Image processing error:", exc_info=True)
+                        alt_texts.append("[Image processing failed]")
+
+            # Append alt texts to the message content
+            modified_content = original_content
+            for alt in alt_texts:
+                modified_content += f" [Image: {alt}]"
+
+            # Add modified message to history
+            history.append({
+                'role': 'user',
+                'name': display_name,
+                'content': modified_content
+            })
+            
+            # Prepare system prompt
+            if is_character and char_id:
+                # Load character data
+                char_path = os.path.join(DATA_DIR, 'chars', f'{char_id}.json')
+                try:
+                    with open(char_path, 'r') as f:
+                        char_data = json.load(f)
+                    description = char_data['description'].format(
+                        char=char_data['name'],
+                        user=display_name 
+                    )
+                    system_prompt = CHAR_PROMPT_TEMPLATE.format(
+                        char=char_data['name'],
+                        description=description,
+                        user=display_name
+                    )
+                except:
+                    system_prompt = SYSTEM_PROMPT
+            else:
+                system_prompt = SYSTEM_PROMPT
+            
+            # Prepare messages with appropriate system prompt
+            messages = [{'role': 'system', 'content': system_prompt}] + history
+            
+            # Get the model to use
+            model = channel_data.get('model', 'openai/gpt-4o')
+            
+            # Trim messages if needed
+            max_tokens = 16000
+            current_tokens = await num_tokens_from_messages(messages, model)
+            while current_tokens > max_tokens and len(history) > 0:
+                history.pop(0)
+                messages = [{'role': 'system', 'content': system_prompt}] + history
+                current_tokens = await num_tokens_from_messages(messages, model)
+            
+            # Generate response
+            completion = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7
+            )
+            
+            ai_response = completion.choices[0].message.content
+            
+            # Add AI response to history
+            history.append({
+                'role': 'assistant',
+                'content': ai_response
+            })
+            
+            # Save updated history
+            channel_data['history'] = history
+            with open(channel_path, 'w') as f:
+                json.dump(channel_data, f)
+            
+            # Split response into chunks
+            MAX_CHARS = 1950
+            chunks = []
+            current_chunk = ""
+
+            # Split by paragraphs and process each
+            for paragraph in ai_response.split('\n\n'):
+                # Clean up any leading/trailing whitespace in the paragraph
+                paragraph = paragraph.strip()
+                if not paragraph:
+                    continue
+                
+                # Check if the entire paragraph is too long on its own
+                if len(paragraph) > MAX_CHARS:
+                    # Split this long paragraph into character-limited chunks
+                    sub_chunks = [paragraph[i:i+MAX_CHARS] for i in range(0, len(paragraph), MAX_CHARS)]
+                    for sub in sub_chunks:
+                        if len(current_chunk) + len(sub) + 2 > MAX_CHARS:  # +2 for newlines
+                            if current_chunk:
+                                chunks.append(current_chunk.strip())
+                                current_chunk = ""
+                            chunks.append(sub.strip())
+                        else:
+                            current_chunk += sub + '\n\n'
+                else:
+                    # Check if adding this paragraph would exceed the limit
+                    if len(current_chunk) + len(paragraph) + 2 > MAX_CHARS:  # +2 for newlines
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                            current_chunk = ""
+                    current_chunk += paragraph + '\n\n'
+
+            # Add remaining content
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+
+            # Final safety check for edge cases
+            final_chunks = []
+            for chunk in chunks:
+                if len(chunk) > 2000:
+                    # Split into 2000-char chunks if any slipped through
+                    final_chunks.extend([chunk[i:i+2000] for i in range(0, len(chunk), 2000)])
+                else:
+                    final_chunks.append(chunk)
+            chunks = final_chunks
+            
+            # Send all chunks
+            for chunk in chunks:
+                await message.channel.send(chunk)
+        
+        except Exception as e:
+            logger.error("An error occurred:", exc_info=True)
+            await message.channel.send(f"An error occurred: {str(e)}")
+
+def main():
+    tray_thread = threading.Thread(target=setup_tray_icon, args=(bot,), daemon=True)
+    tray_thread.start()
+    try:
+        bot.run(DISCORD_TOKEN, log_handler=None, log_level=logging.INFO)
+    finally:
+        logger.info("Bot has shut down")
+
+
+if __name__ == '__main__':
+    main()
