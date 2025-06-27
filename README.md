@@ -64,6 +64,8 @@ Run `RHBot-v2.pyw` (note the `.pyw` extension for headless operation). The bot w
 
 - `/get-character-info` - Get information about a character using its ID.
 
+- `/edit-character` - Edit a character. Requires administrator permissions or the AI Manager role.
+
 - `/delete-character` - Delete a character. Requires administrator permissions or the AI Manager role.
 
 - `/monkeys-paw` - Begin a game of Monkey's Paw. You will have 5 wishes, and the mysterious Monkey's Paw will grant them—with a twist.
@@ -76,7 +78,23 @@ Run `RHBot-v2.pyw` (note the `.pyw` extension for headless operation). The bot w
 
 - `/get-player-card-info` – View one of your cards.
 
+- `/edit-player-card` - Edit a player card.
+
 - `/delete-player-card` – Delete one of your cards.
+
+- `/create-lorebook` - Create a new lorebook.
+
+- `/list-lorebooks` - Show all lorebooks you own.
+
+- `/get-lorebook-info` - View a lorebook’s full text.
+
+- `/edit-lorebook` - Edit a lorebook.
+
+- `/delete-lorebook` - Delete a lorebook.
+
+- `/attach-lorebook` - Attach the lorebook to one of your player cards so it’s sent to the narrator whenever that card is active.
+
+- `/detach-lorebook` - Remove a lorebook from a player card.
 
 - `/start-game` – Begin an adventure in the current channel. Requires administrator permissions or the AI Manager role.
 
@@ -108,6 +126,9 @@ Players create personal player cards, an admin starts a session, and everybody�
 4. **Play** – Simply type; the narrator replies with the evolving story.
 
 5. **Manage** – Admins can `/reset-game` (wipe history but keep players) or `/stop-game` (end and delete everything).
+
+> **Lorebooks**  
+> Any time the narrator seems confused about world-specific terms, write a lorebook explaining them, then `/attach-lorebook` it to the relevant player card(s). Every attached lorebook is injected into the narrator’s system-prompt under a “# Lorebooks” section, ensuring consistent knowledge for future scenes.
 
 ## Models
 

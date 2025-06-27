@@ -179,24 +179,72 @@ def get_player_cards_dir(user_id: int) -> str:
 def get_player_card_path(user_id: int, card_id: str) -> str:
     return os.path.join(get_player_cards_dir(user_id), f'{card_id}.json')
 
+def get_lorebooks_dir(user_id: int) -> str:
+    return os.path.join(DATA_DIR, 'lorebooks', str(user_id))
+
+def get_lorebook_path(user_id: int, lorebook_id: str) -> str:
+    return os.path.join(get_lorebooks_dir(user_id), f'{lorebook_id}.json')
+
 def get_text_game_path(guild_id: int, channel_id: int) -> str:
     return os.path.join(
         DATA_DIR, str(guild_id), 'games', 'textadventure', f'{channel_id}.json'
     )
 
 def build_game_system_prompt(players: dict) -> str:
-    """Return a narrator prompt including all active players."""
     def render(desc: str, name: str) -> str:
-        return (desc
-                .replace('{player}', name)
-                .replace('{Player}', name))
+        return desc.replace('{player}', name).replace('{Player}', name)
 
-    roster = '\n'.join(
+    roster_lines = [
         f"- {p['name']}: {render(p['description'], p['name'])}"
         for p in players.values()
-    )
+    ]
+    roster = "\n".join(roster_lines) or "*nobody yet*"
+
+    seen_ids: set[str] = set()
+    lorebook_chunks: list[str] = []
+
+    for p in players.values():
+        for ref in p.get('lorebooks', []):
+            try:
+                owner_id_str, lb_id = ref.split(':', 1)
+                if ref in seen_ids:
+                    continue  # Don’t duplicate the same lorebook twice
+                seen_ids.add(ref)
+
+                lb_path = get_lorebook_path(int(owner_id_str), lb_id)
+                if not os.path.exists(lb_path):
+                    continue
+                with open(lb_path, 'r') as f:
+                    lb_data = json.load(f)
+                lorebook_chunks.append(
+                    f"## {lb_data['title']}\n{lb_data['content']}"
+                )
+            except Exception:
+                continue  # Corrupt ref – just ignore
+
+    lorebooks_block = "\n".join(lorebook_chunks)
+
+    prompt = (f"""You are a vivid, collaborative narrator for a cooperative multiplayer text adventure. Your sole output should be immersive storytelling prose written in a descriptive, cinematic style. Avoid referencing game mechanics or acknowledging the AI or text-based nature of this environment.
+
+    Each message should be 2-3 paragraphs long, contain rich environmental detail and atmosphere, and include character dialogue (from players and NPCs) when possible. Your messages should also maintain autonomous narrative continuity, meaning that they should form a complete and coherent story even if player messages were removed.
+
+    **DO NOT** take actions on behalf of any player, use out-of-character commentary, or reference “inputs”, “prompts”, “commands”, or similar meta language unless this language is relevant to the story.
     
-    return (f"You are an imaginative, immersive narrator for a co-operative multiplayer text adventure. Respond **only** as narrative prose, never mentioning game mechanics.\n\n**Active player roster:**\n{roster}\n\nAfter each user input, describe how the world reacts and ask what the players do next.")
+    # Active player roster
+    {roster}""")
+
+    if lorebooks_block:
+        prompt += (f"""
+        
+        # Lorebooks
+        Below are lorebooks, which are pieces of additional information that have been included in your context in order to help you better tell this story.
+        {lorebooks_block}""")
+
+    prompt += """
+    
+    After each user message, describe how the world reacts. Introduce narrative developments or characters that align with the genre and tone. You are not merely reactive; you may drive plot hooks forward, introduce danger or opportunity, and evolve the setting—but never dictate player choices. Think like a game master in a collaborative storytelling session: responsive, evocative, and never overpowering."""
+    return prompt
+
 
 def setup_tray_icon():
     icon_path = os.path.join(os.path.dirname(__file__), 'resources', 'icon.ico')
@@ -618,13 +666,92 @@ class CreatePlayerCardModal(Modal, title='Create Player Card'):
             json.dump({
                 'name': self.name.value,
                 'description': self.description.value,
-                'created_at': str(discord.utils.utcnow())
+                'created_at': str(discord.utils.utcnow()),
+                'lorebooks': []
             }, f, indent=2)
 
         await interaction.response.send_message(
             f'Player card {self.name.value} saved as `{cid}`!',
             ephemeral=True
         )
+
+class EditCharacterModal(Modal, title='Edit Character'):
+    def __init__(self, char_id: str, current_name: str, current_desc: str):
+        super().__init__()
+        self.char_id = char_id
+        self.name = TextInput(
+            label='Character Name',
+            max_length=100,
+            required=True,
+            default=current_name # pre-fill
+        )
+        self.description = TextInput(
+            label='Character Description',
+            style=discord.TextStyle.long,
+            required=True,
+            default=current_desc # pre-fill
+        )
+        self.add_item(self.name)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        char_path = os.path.join(DATA_DIR, 'chars', f'{self.char_id}.json')
+        try:
+            with open(char_path, 'r') as f:
+                data = json.load(f)
+            data['name'] = self.name.value
+            data['description'] = self.description.value
+            data['last_edited'] = str(discord.utils.utcnow())
+            with open(char_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            await interaction.response.send_message(
+                f'`{self.char_id}` updated successfully!', ephemeral=True
+            )
+        except Exception as e:
+            logger.error("Character edit failed:", exc_info=True)
+            await interaction.response.send_message(
+                f'Error editing character: {e}', ephemeral=True
+            )
+
+class EditPlayerCardModal(Modal, title='Edit Player Card'):
+    def __init__(self, user_id: int, card_id: str,
+                 current_name: str, current_desc: str):
+        super().__init__()
+        self.user_id = user_id
+        self.card_id = card_id
+        self.name = TextInput(
+            label='Player Name',
+            max_length=100,
+            required=True,
+            default=current_name
+        )
+        self.description = TextInput(
+            label='Player Description',
+            style=discord.TextStyle.long,
+            required=True,
+            default=current_desc
+        )
+        self.add_item(self.name)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        path = get_player_card_path(self.user_id, self.card_id)
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            data['name'] = self.name.value
+            data['description'] = self.description.value
+            data['last_edited'] = str(discord.utils.utcnow())
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            await interaction.response.send_message(
+                f'Card `{self.card_id}` updated!', ephemeral=True
+            )
+        except Exception as e:
+            logger.error("Player-card edit failed:", exc_info=True)
+            await interaction.response.send_message(
+                f'Error editing card: {e}', ephemeral=True
+            )
 
 class DeleteConfirmView(discord.ui.View):
     def __init__(self, character_id: str):
@@ -644,6 +771,143 @@ class DeleteConfirmView(discord.ui.View):
         await interaction.response.send_message('Deletion cancelled.', ephemeral=True)
 
     async def on_timeout(self):
+        self.stop()
+
+class PlayerCardDeleteConfirmView(discord.ui.View):
+    def __init__(self, card_path: str, card_id: str):
+        super().__init__(timeout=30)
+        self.card_path = card_path
+        self.card_id = card_id
+
+    @discord.ui.button(label='Confirm Delete', style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if os.path.exists(self.card_path):
+            os.remove(self.card_path)
+        await interaction.response.send_message(
+            f'Player card `{self.card_id}` deleted!', ephemeral=True
+        )
+        self.stop()
+
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message('Deletion cancelled.', ephemeral=True)
+        self.stop()
+
+class CreateLorebookModal(Modal, title='Create Lorebook'):
+    def __init__(self):
+        super().__init__()
+        self.title_input = TextInput(
+            label='Lorebook Title',
+            max_length=100,
+            required=True,
+            placeholder='Enter a short title…'
+        )
+        self.content_input = TextInput(
+            label='Lorebook Content',
+            style=discord.TextStyle.long,
+            required=True,
+            placeholder='All the juicy details…'
+        )
+        self.lorebook_id = TextInput(
+            label='Lorebook ID',
+            max_length=32,
+            required=True,
+            placeholder='lowercase-numbers-hyphens'
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.content_input)
+        self.add_item(self.lorebook_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lid = self.lorebook_id.value.strip()
+        if not re.match(r'^[a-z0-9\-]+$', lid):
+            await interaction.response.send_message(
+                'Lorebook ID may only contain lowercase letters, numbers and hyphens.',
+                ephemeral=True
+            )
+            return
+        dir_path = get_lorebooks_dir(interaction.user.id)
+        os.makedirs(dir_path, exist_ok=True)
+        lb_path = get_lorebook_path(interaction.user.id, lid)
+        if os.path.exists(lb_path):
+            await interaction.response.send_message(
+                'A lorebook with that ID already exists.',
+                ephemeral=True
+            )
+            return
+
+        with open(lb_path, 'w') as f:
+            json.dump({
+                'title': self.title_input.value,
+                'content': self.content_input.value,
+                'creator_id': interaction.user.id,
+                'created_at': str(discord.utils.utcnow())
+            }, f, indent=2)
+
+        await interaction.response.send_message(
+            f'Lorebook “{self.title_input.value}” saved as `{lid}`!',
+            ephemeral=True
+        )
+
+class EditLorebookModal(Modal, title='Edit Lorebook'):
+    def __init__(self, user_id: int, lorebook_id: str,
+                 current_title: str, current_content: str):
+        super().__init__()
+        self.user_id = user_id
+        self.lorebook_id = lorebook_id
+        self.title_input = TextInput(
+            label='Lorebook Title',
+            max_length=100,
+            required=True,
+            default=current_title
+        )
+        self.content_input = TextInput(
+            label='Lorebook Content',
+            style=discord.TextStyle.long,
+            required=True,
+            default=current_content
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.content_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lb_path = get_lorebook_path(self.user_id, self.lorebook_id)
+        try:
+            with open(lb_path, 'r') as f:
+                data = json.load(f)
+            data['title'] = self.title_input.value
+            data['content'] = self.content_input.value
+            data['last_edited'] = str(discord.utils.utcnow())
+            with open(lb_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            await interaction.response.send_message(
+                f'Lorebook `{self.lorebook_id}` updated!',
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error("Lorebook edit failed:", exc_info=True)
+            await interaction.response.send_message(
+                f'Error editing lorebook: {e}', ephemeral=True
+            )
+
+class LorebookDeleteConfirmView(discord.ui.View):
+    def __init__(self, lb_path: str, lb_id: str):
+        super().__init__(timeout=30)
+        self.lb_path = lb_path
+        self.lb_id = lb_id
+
+    @discord.ui.button(label='Confirm Delete', style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _):
+        if os.path.exists(self.lb_path):
+            os.remove(self.lb_path)
+        await interaction.response.send_message(
+            f'Lorebook `{self.lb_id}` deleted!', ephemeral=True
+        )
+        self.stop()
+
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _):
+        await interaction.response.send_message('Deletion cancelled.', ephemeral=True)
         self.stop()
 
 @bot.tree.error
@@ -998,6 +1262,23 @@ async def get_character_info(interaction: discord.Interaction, character_id: str
         logger.error("Error loading character:", exc_info=True)
         await interaction.response.send_message(f'Error loading character: {str(e)}', ephemeral=True)
 
+@bot.tree.command(name='edit-character', description='Edit an existing RP character')
+@app_commands.check(is_admin_or_ai_manager)
+@app_commands.describe(character_id='ID of the character to edit')
+async def edit_character(interaction: discord.Interaction, character_id: str):
+    char_path = os.path.join(DATA_DIR, 'chars', f'{character_id}.json')
+    if not os.path.exists(char_path):
+        await interaction.response.send_message('Character not found.', ephemeral=True)
+        return
+    with open(char_path) as f:
+        data = json.load(f)
+    modal = EditCharacterModal(
+        char_id=character_id,
+        current_name=data.get('name', ''),
+        current_desc=data.get('description', '')
+    )
+    await interaction.response.send_modal(modal)
+
 @bot.tree.command(name='delete-character', description='Delete a character definition')
 @app_commands.check(is_admin_or_ai_manager)
 @app_commands.describe(character_id='The ID of the character to delete')
@@ -1049,29 +1330,223 @@ async def list_player_cards(interaction: discord.Interaction):
     msg = '\n'.join(cards_list) or '*none*'
     await interaction.response.send_message(f"**Your cards:**\n{msg}", ephemeral=True)
 
-@bot.tree.command(name='get-player-card-info', description='View one of your player cards')
-@app_commands.describe(card_id='ID of the card you own')
+@bot.tree.command(
+    name='get-player-card-info',
+    description='View details about one of your player cards'
+)
+@app_commands.describe(card_id='Your player card ID')
 async def get_player_card_info(interaction: discord.Interaction, card_id: str):
+    """Slash-command: show a player-card’s data (and any attached lorebooks)."""
+    card_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(card_path):
+        await interaction.response.send_message(
+            'Player card not found.', ephemeral=True
+        )
+        return
+
+    with open(card_path, 'r') as f:
+        data = json.load(f)
+
+    created_at = data.get('created_at', 'unknown')
+    desc = data.get('description', '(no description)')
+    desc_rendered = desc.replace('{player}', data.get('name', '???'))
+
+    embed = discord.Embed(
+        title=f"Player Card: {data.get('name','(unnamed)')}",
+        description=desc_rendered,
+        color=discord.Color.orange()
+    )
+    embed.add_field(name='Card ID', value=card_id, inline=True)
+    embed.add_field(name='Created', value=created_at, inline=True)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    if data.get('lorebooks'):
+        lore_lines = [
+            f"- **{ref.split(':')[1]}**  *(owner ID {ref.split(':')[0]})*"
+            for ref in data['lorebooks']
+        ]
+        await interaction.followup.send(
+            "**Attached lorebooks:**\n" + "\n".join(lore_lines),
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            "*(No lorebooks attached to this card.)*",
+            ephemeral=True
+        )
+
+@bot.tree.command(name='edit-player-card', description='Edit one of your player cards')
+@app_commands.describe(card_id='ID of the card to edit')
+async def edit_player_card(interaction: discord.Interaction, card_id: str):
     path = get_player_card_path(interaction.user.id, card_id)
     if not os.path.exists(path):
-        await interaction.response.send_message('Card not found.', ephemeral=True)
+        await interaction.response.send_message('Card not found or not yours.', ephemeral=True)
         return
     with open(path) as f:
         data = json.load(f)
-    await interaction.response.send_message(
-        f"Name: {data['name']}\nID: `{card_id}`\nCreated: {data['created_at']}\nDescription:\n```{data['description']}```",
-        ephemeral=True
+    modal = EditPlayerCardModal(
+        user_id=interaction.user.id,
+        card_id=card_id,
+        current_name=data.get('name', ''),
+        current_desc=data.get('description', '')
     )
+    await interaction.response.send_modal(modal)
 
 @bot.tree.command(name='delete-player-card', description='Delete one of your player cards')
 @app_commands.describe(card_id='ID of the card to delete')
 async def delete_player_card(interaction: discord.Interaction, card_id: str):
-    path = get_player_card_path(interaction.user.id, card_id)
-    if not os.path.exists(path):
+    card_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(card_path):
         await interaction.response.send_message('Card not found.', ephemeral=True)
         return
-    os.remove(path)
-    await interaction.response.send_message(f'Deleted card `{card_id}`.', ephemeral=True)
+
+    view = PlayerCardDeleteConfirmView(card_path, card_id)
+    await interaction.response.send_message(
+        f'Are you sure you want to delete player card `{card_id}`? This cannot be undone!',
+        view=view,
+        ephemeral=True
+    )
+
+@bot.tree.command(name='create-lorebook', description='Create a new lorebook')
+async def create_lorebook(interaction: discord.Interaction):
+    await interaction.response.send_modal(CreateLorebookModal())
+
+@bot.tree.command(name='list-lorebooks', description='List your lorebooks')
+async def list_lorebooks(interaction: discord.Interaction):
+    lb_dir = get_lorebooks_dir(interaction.user.id)
+    if not os.path.isdir(lb_dir):
+        await interaction.response.send_message('You have no lorebooks.', ephemeral=True)
+        return
+
+    entries = []
+    for file in os.listdir(lb_dir):
+        if not file.endswith('.json'):
+            continue
+        lb_id = file[:-5]
+        try:
+            with open(os.path.join(lb_dir, file), 'r') as f:
+                data = json.load(f)
+            entries.append(f"- {data.get('title','(untitled)')} (`{lb_id}`)")
+        except Exception:
+            entries.append(f"- Corrupted File (`{lb_id}`)")
+
+    await interaction.response.send_message(
+        "**Your lorebooks:**\n" + ("\n".join(entries) or "*none*"),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name='get-lorebook-info', description='View a lorebook')
+@app_commands.describe(lorebook_id='Your lorebook ID')
+async def get_lorebook_info(interaction: discord.Interaction, lorebook_id: str):
+    lb_path = get_lorebook_path(interaction.user.id, lorebook_id)
+    if not os.path.exists(lb_path):
+        await interaction.response.send_message('Lorebook not found.', ephemeral=True)
+        return
+    with open(lb_path) as f:
+        data = json.load(f)
+
+    await interaction.response.send_message(
+        f"Title: {data['title']}\nID: `{lorebook_id}`\nCreated: {data['created_at']}\n"
+        "Content:\n```plaintext\n" + data['content'] + "\n```",
+        ephemeral=True
+    )
+
+@bot.tree.command(name='edit-lorebook', description='Edit one of your lorebooks')
+@app_commands.describe(lorebook_id='Lorebook ID')
+async def edit_lorebook(interaction: discord.Interaction, lorebook_id: str):
+    lb_path = get_lorebook_path(interaction.user.id, lorebook_id)
+    if not os.path.exists(lb_path):
+        await interaction.response.send_message('Lorebook not found.', ephemeral=True)
+        return
+    with open(lb_path) as f:
+        data = json.load(f)
+    modal = EditLorebookModal(
+        user_id=interaction.user.id,
+        lorebook_id=lorebook_id,
+        current_title=data.get('title', ''),
+        current_content=data.get('content', '')
+    )
+    await interaction.response.send_modal(modal)
+
+@bot.tree.command(name='delete-lorebook', description='Delete a lorebook')
+@app_commands.describe(lorebook_id='Lorebook ID')
+async def delete_lorebook(interaction: discord.Interaction, lorebook_id: str):
+    lb_path = get_lorebook_path(interaction.user.id, lorebook_id)
+    if not os.path.exists(lb_path):
+        await interaction.response.send_message('Lorebook not found.', ephemeral=True)
+        return
+    view = LorebookDeleteConfirmView(lb_path, lorebook_id)
+    await interaction.response.send_message(
+        f'Are you sure you want to delete lorebook `{lorebook_id}`?',
+        view=view,
+        ephemeral=True
+    )
+
+@bot.tree.command(
+    name='attach-lorebook',
+    description='Attach one of your lorebooks to a player card'
+)
+@app_commands.describe(
+    card_id='Your player card ID',
+    lorebook_id='Lorebook ID to attach'
+)
+async def attach_lorebook(interaction: discord.Interaction, card_id: str, lorebook_id: str):
+    card_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(card_path):
+        await interaction.response.send_message('Player card not found.', ephemeral=True)
+        return
+
+    lb_path = get_lorebook_path(interaction.user.id, lorebook_id)
+    if not os.path.exists(lb_path):
+        await interaction.response.send_message('Lorebook not found.', ephemeral=True)
+        return
+
+    with open(card_path, 'r') as f:
+        card = json.load(f)
+    lore_list = card.get('lorebooks', [])
+    ref = f"{interaction.user.id}:{lorebook_id}"
+    if ref in lore_list:
+        await interaction.response.send_message('That lorebook is already attached.', ephemeral=True)
+        return
+    lore_list.append(ref)
+    card['lorebooks'] = lore_list
+    with open(card_path, 'w') as f:
+        json.dump(card, f, indent=2)
+
+    await interaction.response.send_message(
+        f'Lorebook `{lorebook_id}` attached to card `{card_id}`.',
+        ephemeral=True
+    )
+
+@bot.tree.command(
+    name='detach-lorebook',
+    description='Remove a lorebook from a player card'
+)
+@app_commands.describe(
+    card_id='Your player card ID',
+    lorebook_id='Lorebook ID to detach'
+)
+async def detach_lorebook(interaction: discord.Interaction, card_id: str, lorebook_id: str):
+    card_path = get_player_card_path(interaction.user.id, card_id)
+    if not os.path.exists(card_path):
+        await interaction.response.send_message('Player card not found.', ephemeral=True)
+        return
+
+    with open(card_path, 'r') as f:
+        card = json.load(f)
+    ref = f"{interaction.user.id}:{lorebook_id}"
+    if ref not in card.get('lorebooks', []):
+        await interaction.response.send_message('That lorebook is not attached.', ephemeral=True)
+        return
+    card['lorebooks'].remove(ref)
+    with open(card_path, 'w') as f:
+        json.dump(card, f, indent=2)
+    await interaction.response.send_message(
+        f'Lorebook `{lorebook_id}` detached from card `{card_id}`.',
+        ephemeral=True
+    )
 
 @bot.tree.command(name='start-game', description='Begin a multiplayer text adventure in this channel')
 @app_commands.check(is_admin_or_ai_manager)
@@ -1100,6 +1575,7 @@ async def start_game(interaction: discord.Interaction, card_id: str):
                 'name': pc_data['name'],
                 'description': pc_data['description'],
                 'card_id': card_id,
+                'lorebooks': pc_data.get('lorebooks', []),
                 'joined_at': str(discord.utils.utcnow())
             }
         },
@@ -1184,6 +1660,7 @@ async def drop_in(interaction: discord.Interaction, card_id: str, style: Optiona
         'name': pc_data['name'],
         'description': pc_data['description'],
         'card_id': card_id,
+        'lorebooks': pc_data.get('lorebooks', []),
         'joined_at': str(discord.utils.utcnow())
     }
 
