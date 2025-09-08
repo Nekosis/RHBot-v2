@@ -76,7 +76,7 @@ TOKENIZER_WIZARDLM = AutoTokenizer.from_pretrained(
 )
 MODEL_CHOICES = [
     app_commands.Choice(name='GPT-4o', value='openai/gpt-4o'),
-    app_commands.Choice(name='GPT-5 Chat', value='openai/gpt-5-chat'),
+    app_commands.Choice(name='GPT-5', value='openai/gpt-5'),
     app_commands.Choice(name='Claude 3.7 Sonnet', value='anthropic/claude-3.7-sonnet'),
     app_commands.Choice(name='WizardLM-2 8x22B', value='microsoft/wizardlm-2-8x22b'),
 ]
@@ -97,7 +97,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=None, intents=intents)
 
 async def num_tokens_from_messages(messages, model):
-    if model in ('openai/gpt-4o', 'openai/gpt-5-chat'):
+    if model in ('openai/gpt-4o', 'openai/gpt-5'):
         def _gpt4o_count():
             num_tokens = 0
             for message in messages:
